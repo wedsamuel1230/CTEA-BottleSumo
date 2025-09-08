@@ -15,5 +15,14 @@ void loop() {
   Serial.print(voltage, 2); // Print voltage with 2 decimal places
   Serial.println("V");
 
+  if(voltage >= 3.0){
+    Serial.println("Out of bounds");
+    value = 1;
+  }
+  else:{
+    Serial.println("Okay");
+    value = 0;
+  }
+
   delay(100); // Small delay for stable readings
 }
