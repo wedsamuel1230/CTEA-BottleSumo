@@ -7,7 +7,7 @@ byte result;
 
 // Sensor result mapping explanation:
 // Decimal → Binary (btn4 btn3 btn2 btn1)
-// 0  → 0000 (無按鈕)
+// 0  → 0000 (冇出界)
 // 1  → 0001 (左上)
 // 2  → 0010 (右上)
 // 3  → 0011 (左上 + 右上)
