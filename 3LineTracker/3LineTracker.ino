@@ -22,7 +22,7 @@ void setup() {
 // 15 → 1111 (左上 + 右上 + 右下 + 左下)
 
 int check_line_tracker(float thershold){
-  int result;
+  int result = 0;
   int sensorValue1 = analogRead(A0); // Read analog value from ADC0 (GP26)
   int sensorValue2 = analogRead(A1); // Read analog value from ADC1 (GP27)
   int sensorValue4 = analogRead(A2); // Read analog value from ADC2 (GP28)
@@ -54,14 +54,16 @@ int check_line_tracker(float thershold){
   Serial.print(", Voltage(4): ");
   Serial.print(voltage4, 2); // Print voltage with 2 decimal places
   Serial.println("V");
+
+  Serial.println("Result(Binary): ");
+  Serial.print(result, BIN);
+  Serial.print("Result: ");
+  Serial.println(result);
   return result;
 }
 
 void loop() {
-  Serial.print("Result(Binary): ");
-  Serial.println(check_line_tracker(2.5), BIN);
-  Serial.print("Result: ");
-  Serial.println(check_line_tracker(2.5));
+  check_line_tracker(3.0);
   delay(100); // Small delay for stable readings
 }
 
