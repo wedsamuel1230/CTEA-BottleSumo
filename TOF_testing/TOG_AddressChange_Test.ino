@@ -77,7 +77,7 @@ void setup() {
     digitalWrite(xshutPins[i], HIGH);
   }
 }
-
+/*
 void motorForward(int speed = 200) {
   digitalWrite(leftDirFwd, HIGH);
   digitalWrite(leftDirRev, LOW);
@@ -118,7 +118,7 @@ void motorSearchSpin(int speed = 100) {
   analogWrite(leftPWM, speed);
   analogWrite(rightPWM, speed);
 }
-
+*/
 void loop() {
   int distances[numSensors];
   bool opponentDetected = false;
