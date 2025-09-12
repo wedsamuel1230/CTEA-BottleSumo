@@ -1,3 +1,4 @@
+//This is a example of motor testing
 //Make sure there is a common ground between mcu and motor, otherwise you wouldn't be able to control the speed of the motor using pwm.
 //To power the motor, connect the VCC and the GND  to the power supply, and turn the voltage to ~7V.
 
