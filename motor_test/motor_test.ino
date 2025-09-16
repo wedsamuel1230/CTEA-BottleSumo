@@ -3,33 +3,43 @@
 //To power the motor, connect the VCC and the GND  to the power supply, and turn the voltage to ~7V.
 
 //pins for motor and button
-#define WhitePin 15 // Clockwise/Anti-clockwise
-#define BluePin 15 //pwm speed control
+#define BluePin 17 //pwm speed control
+#define WhitePin 16
 #define btn 3 //for testing only
 
 void setup() {
   Serial.begin(9600);
   //make the pins outputs 
-  pinMode(WhitePin, OUTPUT);
   pinMode(BluePin, OUTPUT);
+  analogWrite(BluePin, 0); //control the motor at full speed using pwm
+}
+
+void setup1(){
+  Serial.begin(9600);
+  pinMode(WhitePin, OUTPUT);
   pinMode(btn, INPUT_PULLUP);
 }
 
 void loop() {
-  analogWrite(BluePin, 255); //control the motor at full speed using pwm
-  analogWrite(WhitePin, 255); //control the motor at full speed using pwm
-  delay(5000); //wait for 1 second
+  analogWrite(BluePin, 127); //control the motor at half speed using pwm
+  delay(2500); //wait for 2.5 second
+  analogWrite(BluePin, 255);//stop
+  delay(2500); //wait for 2.5 second
+  analogWrite(BluePin, 0); //full speed
+  delay(2500); //wait for 2.5 second
+  analogWrite(BluePin, 255);//stop
+  delay(2500); //wait for 2.5 second
 }
 
-/*
+
 void loop1(){ //using 2nd core in rasberry pi pico 
   //look if the button pressed
-  if (digitalRead(btn) == 1){
-    digitalWrite(BluePin, LOW); //turn the motor anti-clockwise
+  if (digitalRead(btn) == LOW){z
+    digitalWrite(WhitePin, LOW); //turn the motor anti-clockwise
     Serial.println(F("Anti-clockwise"));
   }
   else {
-    digitalWrite(BluePin, HIGH);//turn the motor clockwise
+    digitalWrite(WhitePin, HIGH);//turn the motor clockwise
   }
+  delay(50);
 }
-*/
