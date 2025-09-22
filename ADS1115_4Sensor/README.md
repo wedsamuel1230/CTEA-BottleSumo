@@ -46,6 +46,13 @@ Simplified version following repository patterns:
 - Binary result calculation
 - Matches existing line tracker code style
 
+### ADS1115_Integration.ino
+Integration example showing system integration:
+- Motor control integration (similar to repository patterns)
+- State-based decision making
+- Emergency stop functionality
+- Utility functions for system coordination
+
 ## Usage
 
 1. Open Arduino IDE
