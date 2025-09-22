@@ -3,15 +3,15 @@
 //To power the motor, connect the VCC and the GND  to the power supply, and turn the voltage to ~7V.
 
 //pins for motor and button
-#define WhitePin 15 // Clockwise/Anti-clockwise
-#define BluePin 15 //pwm speed control
+#define Motor1PWM 0 // Clockwise/Anti-clockwise
+#define Motor2PWM 1 //pwm speed control
 #define btn 3 //for testing only
 
 void setup() {
   Serial.begin(9600);
   //make the pins outputs 
-  pinMode(WhitePin, OUTPUT);
-  pinMode(BluePin, OUTPUT);
+  pinMode(Motor1PWM, OUTPUT);
+  pinMode(Motor2PWM, OUTPUT);
   pinMode(btn, INPUT_PULLUP);
 }
 
