@@ -1,14 +1,15 @@
 /*
- * 雙核心 Bottle Sumo Robot - QRE1113 Edge Detection System
+ * 雙核心 Bottle Sumo Robot - QRE1113 Edge Detection System with OLED Display
  * 使用 Raspberry Pi Pico 雙核心架構進行高效能控制
  * 
  * 架構設計:
- * Core 0 (主核心): 馬達控制、戰術邏輯、串口通訊
+ * Core 0 (主核心): 馬達控制、戰術邏輯、串口通訊、OLED 顯示
  * Core 1 (次核心): 專門負責感測器讀取，提供即時數據
  * 
  * 性能優勢:
  * - Core 1 以最高速度讀取感測器 (~860 Hz)
  * - Core 0 專注於邏輯處理和馬達控制 (~100 Hz)
+ * - OLED 顯示器以 5Hz 更新，不影響關鍵性能
  * - 數據同步通過 mutex 確保線程安全
  * - 總體反應速度提升 2-5 倍
  * 
@@ -16,8 +17,14 @@
  * ADS1115    Raspberry Pi Pico
  * VDD     ←→  3.3V (3V3 OUT)
  * GND     ←→  GND
- * SCL     ←→  SCL (預設引腳)
- * SDA     ←→  SDA (預設引腳)
+ * SCL     ←→  GP5 (Wire)
+ * SDA     ←→  GP4 (Wire)
+ * 
+ * OLED (SSD1306)  Raspberry Pi Pico
+ * VDD     ←→  3.3V (3V3 OUT)
+ * GND     ←→  GND
+ * SCL     ←→  GP27 (Wire1)
+ * SDA     ←→  GP26 (Wire1)
  * 
  * ADS1115    QRE1113 感測器
  * A0      ←→  QRE1113 #1 (前左)
@@ -29,13 +36,42 @@
  * 左馬達: GPIO pins TBD
  * 右馬達: GPIO pins TBD
  * 
- * 性能: Core 1 ~860 Hz 感測器讀取, Core 0 ~100 Hz 控制循環
- * 作者: CTEA-BottleSumo 專案 - 雙核心版本
+ * 所需庫文件 (請在 Arduino IDE 中安裝):
+ * - Adafruit ADS1X15 (ADS1115 支援)
+ * - Adafruit GFX Library (圖形庫)
+ * - Adafruit SSD1306 (OLED 顯示器支援)
+ * 
+ * 性能: Core 1 ~860 Hz 感測器讀取, Core 0 ~100 Hz 控制循環, OLED 5Hz 更新
+ * 作者: CTEA-BottleSumo 專案 - 雙核心 + OLED 版本
  * 日期: 2025-09-23
  */
 
 #include <Adafruit_ADS1X15.h>
 #include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// ========== OLED 顯示器配置 ==========
+
+#define SCREEN_WIDTH 128     // OLED 顯示器寬度（像素）
+#define SCREEN_HEIGHT 64     // OLED 顯示器高度（像素）
+#define OLED_RESET -1        // 重置引腳（如果共用 Arduino 重置引腳則設為 -1）
+#define SCREEN_ADDRESS 0x3C  // OLED I2C 地址（通常為 0x3C 或 0x3D）
+
+// OLED I2C 引腳配置（使用 Wire1 實例）
+#define OLED_SDA_PIN 26      // GP26 - SDA
+#define OLED_SCL_PIN 27      // GP27 - SCL
+
+// ADS1115 I2C 引腳配置（使用 Wire 實例）
+#define ADS_SDA_PIN 4        // GP4 - SDA
+#define ADS_SCL_PIN 5        // GP5 - SCL
+
+// 創建 OLED 顯示器對象
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire1, OLED_RESET);
+
+// OLED 更新控制
+unsigned long lastOLEDUpdate = 0;
+const unsigned long OLED_UPDATE_INTERVAL = 200;  // 200ms 更新間隔（5Hz），避免影響性能
 
 // ========== 雙核心支援 ==========
 
@@ -189,6 +225,15 @@ void setup() {
   shared_data.data_ready = false;
   shared_data.timestamp = 0;
   
+  // 初始化 OLED 顯示器
+  Serial.println("初始化 OLED 顯示器...");
+  if (initOLEDDisplay()) {
+    Serial.println("✓ OLED 顯示器初始化完成");
+    showStartupScreen();  // 顯示啟動畫面
+  } else {
+    Serial.println("⚠️ OLED 顯示器初始化失敗");
+  }
+  
   // 等待 Core 1 啟動
   Serial.println("等待 Core 1 (感測器核心) 啟動...");
   while (!core1_active) {
@@ -218,7 +263,9 @@ void setup1() {
 
 // 初始化感測器系統
 bool initSensorSystem() {
-  // 初始化 I2C（使用預設引腳）
+  // 初始化 I2C 用於 ADS1115 (使用指定引腳)
+  Wire.setSDA(ADS_SDA_PIN);
+  Wire.setSCL(ADS_SCL_PIN);
   Wire.begin();
   Wire.setClock(400000);  // 設定 I2C 為快速模式 400kHz
   
@@ -226,10 +273,30 @@ bool initSensorSystem() {
   ads.setGain(GAIN_ONE);  // ±4.096V 範圍
   ads.setDataRate(RATE_ADS1115_860SPS);  // 最高取樣率 860 SPS
   
-  // 初始化 ADS1115
-  if (!ads.begin()) {
+  // 初始化 ADS1115（使用默認地址0x48和Wire）
+  if (!ads.begin(0x48, &Wire)) {
     return false;
   }
+  
+  return true;
+}
+
+// 初始化 OLED 顯示器
+bool initOLEDDisplay() {
+  // 初始化 I2C 用於 OLED (使用指定引腳)
+  Wire1.setSDA(OLED_SDA_PIN);
+  Wire1.setSCL(OLED_SCL_PIN);
+  Wire1.begin();
+  Wire1.setClock(400000);  // 400kHz I2C 時鐘
+  
+  // 初始化 SSD1306 顯示器
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    return false;
+  }
+  
+  // 清除顯示緩衝區
+  display.clearDisplay();
+  display.display();
   
   return true;
 }
@@ -238,14 +305,190 @@ bool initSensorSystem() {
 void printSystemInfo() {
   Serial.println("系統規格:");
   Serial.println("- 處理器: 雙核心 RP2040");
-  Serial.println("- Core 0: 馬達控制與戰術邏輯");
+  Serial.println("- Core 0: 馬達控制與戰術邏輯 + OLED");
   Serial.println("- Core 1: 高速感測器讀取");
   Serial.println("- ADC: ADS1115 16-bit");
-  Serial.println("- I2C: 400kHz 快速模式");
+  Serial.println("- I2C: 400kHz 快速模式 (雙路)");
   Serial.println("- 取樣率: 860 SPS");
   Serial.println("- 感測器: 4x QRE1113");
+  Serial.println("- 顯示器: SSD1306 128x64 OLED");
   Serial.println("- 預期性能: >500 Hz (雙核心)");
   Serial.println("=====================================");
+}
+
+// ========== OLED 顯示函數 ==========
+
+// 顯示啟動畫面
+void showStartupScreen() {
+  display.clearDisplay();
+  
+  // 設定文字顏色和大小
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  
+  // 標題
+  display.setCursor(15, 0);
+  display.println("BOTTLE SUMO ROBOT");
+  
+  // 分隔線
+  display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+  
+  // 系統信息
+  display.setCursor(0, 15);
+  display.println("Dual-Core RP2040");
+  display.setCursor(0, 25);
+  display.println("Core 0: Motor Control");
+  display.setCursor(0, 35);
+  display.println("Core 1: Sensors 860Hz");
+  
+  // 硬體信息
+  display.setCursor(0, 50);
+  display.println("ADS1115 + 4x QRE1113");
+  
+  // 狀態指示
+  display.setCursor(85, 55);
+  display.println("READY!");
+  
+  display.display();
+  delay(2000);  // 顯示 2 秒
+}
+
+// 顯示系統狀態
+void showSystemStatus(QRE_AllSensors &sensors) {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  
+  // 標題
+  display.setCursor(30, 0);
+  display.println("SYSTEM STATUS");
+  display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+  
+  // 核心狀態
+  display.setCursor(0, 15);
+  display.print("C0:");
+  display.print(core0_loop_count * 1000.0 / millis(), 0);
+  display.print("Hz");
+  
+  display.setCursor(65, 15);
+  display.print("C1:");
+  display.print(core1_loop_count * 1000.0 / millis(), 0);
+  display.print("Hz");
+  
+  // 感測器狀態
+  display.setCursor(0, 27);
+  display.println("Sensors (V):");
+  
+  // 感測器數值 (簡化顯示)
+  display.setCursor(0, 37);
+  display.print("FL:");
+  display.print(sensors.sensor[0].voltage, 1);
+  
+  display.setCursor(65, 37);
+  display.print("FR:");
+  display.print(sensors.sensor[1].voltage, 1);
+  
+  display.setCursor(0, 47);
+  display.print("BL:");
+  display.print(sensors.sensor[2].voltage, 1);
+  
+  display.setCursor(65, 47);
+  display.print("BR:");
+  display.print(sensors.sensor[3].voltage, 1);
+  
+  // 邊緣檢測狀態
+  display.setCursor(0, 57);
+  if (sensors.isEdgeDetected()) {
+    display.print("EDGE!");
+    display.setCursor(35, 57);
+    display.print(sensors.getEdgeDirection());
+  } else {
+    display.print("SAFE - SEARCHING");
+  }
+  
+  display.display();
+}
+
+// 顯示戰術狀態
+void showTacticalStatus(SumoAction action, QRE_AllSensors &sensors) {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  
+  // 標題
+  display.setCursor(25, 0);
+  display.println("TACTICAL MODE");
+  display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+  
+  // 動作狀態
+  display.setCursor(0, 15);
+  display.print("Action: ");
+  switch (action) {
+    case SEARCH_OPPONENT:
+      display.println("SEARCH");
+      break;
+    case ATTACK_FORWARD:
+      display.println("ATTACK");
+      break;
+    case RETREAT_AND_TURN:
+      display.println("RETREAT");
+      break;
+    case EMERGENCY_REVERSE:
+      display.println("EMERGENCY");
+      break;
+  }
+  
+  // 危險等級指示器
+  display.setCursor(0, 27);
+  display.print("Danger: ");
+  int danger = sensors.getDangerLevel();
+  display.print(danger);
+  display.print("/4 ");
+  
+  // 視覺化危險等級
+  for (int i = 0; i < 4; i++) {
+    if (i < danger) {
+      display.fillRect(70 + i * 12, 25, 10, 8, SSD1306_WHITE);
+    } else {
+      display.drawRect(70 + i * 12, 25, 10, 8, SSD1306_WHITE);
+    }
+  }
+  
+  // 方向指示
+  display.setCursor(0, 40);
+  display.print("Direction: ");
+  display.println(sensors.getEdgeDirection());
+  
+  // 數據新鮮度
+  display.setCursor(0, 52);
+  display.print("Data: ");
+  display.println(sensors.isDataFresh() ? "FRESH" : "STALE");
+  
+  display.display();
+}
+
+// 主要 OLED 更新函數 - 根據系統狀態選擇顯示內容
+void updateOLEDDisplay(QRE_AllSensors &sensors, SumoAction action) {
+  static int displayMode = 0;  // 0: 系統狀態, 1: 戰術狀態
+  static unsigned long lastModeSwitch = 0;
+  
+  // 每 4 秒切換顯示模式
+  if (millis() - lastModeSwitch > 4000) {
+    displayMode = (displayMode + 1) % 2;
+    lastModeSwitch = millis();
+  }
+  
+  // 如果檢測到邊緣，強制顯示戰術狀態
+  if (sensors.isEdgeDetected()) {
+    showTacticalStatus(action, sensors);
+  } else {
+    // 正常情況下輪換顯示
+    if (displayMode == 0) {
+      showSystemStatus(sensors);
+    } else {
+      showTacticalStatus(action, sensors);
+    }
+  }
 }
 
 // ========== 感測器讀取函數 ==========
@@ -452,6 +695,12 @@ void loop() {
     Serial.print(core1_loop_count * 1000.0 / millis(), 1);
     Serial.println(" Hz");
     Serial.println();
+    
+    // 更新 OLED 顯示 (控制更新頻率)
+    if (millis() - lastOLEDUpdate > OLED_UPDATE_INTERVAL) {
+      updateOLEDDisplay(all_sensors, action);
+      lastOLEDUpdate = millis();
+    }
   } else {
     // 快速循環：只顯示關鍵資訊
     Serial.print("C0-");
@@ -600,4 +849,20 @@ const int SPEED_HIGH = 255;
  *    int16_t raw_values[4];
  *    getAllSensorsRaw(raw_values);
  *    // 直接使用原始值進行快速判斷
+ * 
+ * 5. OLED 顯示功能:
+ *    - 啟動時自動顯示歡迎畫面
+ *    - 系統狀態頁面：核心頻率、感測器數值
+ *    - 戰術狀態頁面：當前動作、危險等級、方向
+ *    - 自動在正常和緊急模式間切換顯示
+ * 
+ * 設置步驟:
+ * 1. 安裝 Arduino IDE 庫:
+ *    - Adafruit ADS1X15
+ *    - Adafruit GFX Library
+ *    - Adafruit SSD1306
+ * 2. 連接硬體如上述線路圖
+ * 3. 上傳程式到 Raspberry Pi Pico
+ * 4. 打開串口監視器查看系統狀態
+ * 5. OLED 將自動顯示啟動信息和運行狀態
  */
