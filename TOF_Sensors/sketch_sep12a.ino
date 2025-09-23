@@ -52,7 +52,7 @@ void setup() {
   delay(100);
 
   //sensor3
-  digitalWrite(XSHUT_2, HIGH);
+  digitalWrite(XSHUT_3, HIGH);
   delay(100);
   lox3.begin(0x72,false,&Wire1);
   delay(100);
@@ -60,7 +60,7 @@ void setup() {
   delay(100);
   digitalWrite(XSHUT_3, LOW);
   delay(100);
-  
+
   // Turn sensor back ON for normal operation
   digitalWrite(XSHUT_1, HIGH);
   digitalWrite(XSHUT_2, HIGH);
