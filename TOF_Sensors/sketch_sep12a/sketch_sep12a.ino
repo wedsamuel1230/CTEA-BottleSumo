@@ -26,50 +26,51 @@ void setup() {
   digitalWrite(XSHUT_1, LOW);
   digitalWrite(XSHUT_2, LOW);
   digitalWrite(XSHUT_3, LOW);
-  delay(100);
+  delay(50);
 
   // Change the TOF sensor Address
-
   //Sensor 1
-
   digitalWrite(XSHUT_1, HIGH);
-  delay(100);
+  delay(50);
   lox1.begin(0x70,false,&Wire1);
-  delay(100);
-  scanI2C();
-  delay(100);
-  digitalWrite(XSHUT_1, LOW);
-  delay(100);
+  delay(50);
 
   //sensor 2
   digitalWrite(XSHUT_2, HIGH);
-  delay(100);
+  delay(50);
   lox2.begin(0x71,false,&Wire1);
-  delay(100);
-  scanI2C();
-  delay(100);
-  digitalWrite(XSHUT_2, LOW);
-  delay(100);
+  delay(50);
 
   //sensor3
   digitalWrite(XSHUT_3, HIGH);
-  delay(100);
+  delay(50);
   lox3.begin(0x72,false,&Wire1);
-  delay(100);
+  delay(50);
   scanI2C();
-  delay(100);
-  digitalWrite(XSHUT_3, LOW);
-  delay(100);
-
-  // Turn sensor back ON for normal operation
-  digitalWrite(XSHUT_1, HIGH);
-  digitalWrite(XSHUT_2, HIGH);
-  digitalWrite(XSHUT_3, HIGH);
 }
 
 void loop() {
-  // do nothing
+  
+  VL53L0X_RangingMeasurementData_t data1, data2, data3;
+
+  lox1.rangingTest(&data1, false);
+  lox2.rangingTest(&data2, false);
+  lox3.rangingTest(&data3, false);
+
+  Serial.print("Sensor 1: ");
+  if (data1.RangeStatus == 0) Serial.print(data1.RangeMilliMeter);
+  else Serial.print("Error (status: "); Serial.print(data1.RangeStatus); Serial.print(")");
+  
+  Serial.print("\tSensor 2: ");
+  if (data2.RangeStatus == 0) Serial.print(data2.RangeMilliMeter);
+  else Serial.print("Error (status: "); Serial.print(data2.RangeStatus); Serial.print(")");
+
+  Serial.print("\tSensor 3: ");
+  if (data3.RangeStatus == 0) Serial.println(data3.RangeMilliMeter);
+  else { Serial.print("Error (status: "); Serial.print(data3.RangeStatus); Serial.println(")"); }
+  delay(100);
 }
+
 
 void scanI2C() {
   byte error, address;
