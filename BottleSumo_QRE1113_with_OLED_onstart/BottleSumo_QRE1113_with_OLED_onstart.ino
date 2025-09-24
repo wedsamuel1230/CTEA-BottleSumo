@@ -17,14 +17,14 @@
  * ADS1115    Raspberry Pi Pico
  * VDD     ←→  3.3V (3V3 OUT)
  * GND     ←→  GND
- * SCL     ←→  GP5 (Wire)
- * SDA     ←→  GP4 (Wire)
+ * SCL     ←→  SCL (預設引腳，Wire1)
+ * SDA     ←→  SDA (預設引腳，Wire1)
  * 
  * OLED (SSD1306)  Raspberry Pi Pico
  * VDD     ←→  3.3V (3V3 OUT)
  * GND     ←→  GND
- * SCL     ←→  GP27 (Wire1)
- * SDA     ←→  GP26 (Wire1)
+ * SCL     ←→  GP27
+ * SDA     ←→  GP26
  * 
  * ADS1115    QRE1113 感測器
  * A0      ←→  QRE1113 #1 (前左)
@@ -58,13 +58,9 @@
 #define OLED_RESET -1        // 重置引腳（如果共用 Arduino 重置引腳則設為 -1）
 #define SCREEN_ADDRESS 0x3C  // OLED I2C 地址（通常為 0x3C 或 0x3D）
 
-// OLED I2C 引腳配置（使用 Wire1 實例）
+// OLED I2C 引腳配置（使用 Wire 實例，與 ADS1115 的 Wire1 分離）
 #define OLED_SDA_PIN 26      // GP26 - SDA
 #define OLED_SCL_PIN 27      // GP27 - SCL
-
-// ADS1115 I2C 引腳配置（使用 Wire 實例）
-#define ADS_SDA_PIN 4        // GP4 - SDA
-#define ADS_SCL_PIN 5        // GP5 - SCL
 
 // 創建 OLED 顯示器對象
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire1, OLED_RESET);
@@ -263,9 +259,7 @@ void setup1() {
 
 // 初始化感測器系統
 bool initSensorSystem() {
-  // 初始化 I2C 用於 ADS1115 (使用指定引腳)
-  Wire.setSDA(ADS_SDA_PIN);
-  Wire.setSCL(ADS_SCL_PIN);
+  // 初始化 I2C（使用預設引腳）
   Wire.begin();
   Wire.setClock(400000);  // 設定 I2C 為快速模式 400kHz
   
@@ -273,7 +267,7 @@ bool initSensorSystem() {
   ads.setGain(GAIN_ONE);  // ±4.096V 範圍
   ads.setDataRate(RATE_ADS1115_860SPS);  // 最高取樣率 860 SPS
   
-  // 初始化 ADS1115（使用默認地址0x48和Wire）
+  // 初始化 ADS1115（使用默認地址0x48和Wire1）
   if (!ads.begin(0x48, &Wire)) {
     return false;
   }
@@ -290,7 +284,7 @@ bool initOLEDDisplay() {
   Wire1.setClock(400000);  // 400kHz I2C 時鐘
   
   // 初始化 SSD1306 顯示器
-  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS,&Wire1)) {
     return false;
   }
   
@@ -351,144 +345,6 @@ void showStartupScreen() {
   
   display.display();
   delay(2000);  // 顯示 2 秒
-}
-
-// 顯示系統狀態
-void showSystemStatus(QRE_AllSensors &sensors) {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  
-  // 標題
-  display.setCursor(30, 0);
-  display.println("SYSTEM STATUS");
-  display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
-  
-  // 核心狀態
-  display.setCursor(0, 15);
-  display.print("C0:");
-  display.print(core0_loop_count * 1000.0 / millis(), 0);
-  display.print("Hz");
-  
-  display.setCursor(65, 15);
-  display.print("C1:");
-  display.print(core1_loop_count * 1000.0 / millis(), 0);
-  display.print("Hz");
-  
-  // 感測器狀態
-  display.setCursor(0, 27);
-  display.println("Sensors (V):");
-  
-  // 感測器數值 (簡化顯示)
-  display.setCursor(0, 37);
-  display.print("FL:");
-  display.print(sensors.sensor[0].voltage, 1);
-  
-  display.setCursor(65, 37);
-  display.print("FR:");
-  display.print(sensors.sensor[1].voltage, 1);
-  
-  display.setCursor(0, 47);
-  display.print("BL:");
-  display.print(sensors.sensor[2].voltage, 1);
-  
-  display.setCursor(65, 47);
-  display.print("BR:");
-  display.print(sensors.sensor[3].voltage, 1);
-  
-  // 邊緣檢測狀態
-  display.setCursor(0, 57);
-  if (sensors.isEdgeDetected()) {
-    display.print("EDGE!");
-    display.setCursor(35, 57);
-    display.print(sensors.getEdgeDirection());
-  } else {
-    display.print("SAFE - SEARCHING");
-  }
-  
-  display.display();
-}
-
-// 顯示戰術狀態
-void showTacticalStatus(SumoAction action, QRE_AllSensors &sensors) {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  
-  // 標題
-  display.setCursor(25, 0);
-  display.println("TACTICAL MODE");
-  display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
-  
-  // 動作狀態
-  display.setCursor(0, 15);
-  display.print("Action: ");
-  switch (action) {
-    case SEARCH_OPPONENT:
-      display.println("SEARCH");
-      break;
-    case ATTACK_FORWARD:
-      display.println("ATTACK");
-      break;
-    case RETREAT_AND_TURN:
-      display.println("RETREAT");
-      break;
-    case EMERGENCY_REVERSE:
-      display.println("EMERGENCY");
-      break;
-  }
-  
-  // 危險等級指示器
-  display.setCursor(0, 27);
-  display.print("Danger: ");
-  int danger = sensors.getDangerLevel();
-  display.print(danger);
-  display.print("/4 ");
-  
-  // 視覺化危險等級
-  for (int i = 0; i < 4; i++) {
-    if (i < danger) {
-      display.fillRect(70 + i * 12, 25, 10, 8, SSD1306_WHITE);
-    } else {
-      display.drawRect(70 + i * 12, 25, 10, 8, SSD1306_WHITE);
-    }
-  }
-  
-  // 方向指示
-  display.setCursor(0, 40);
-  display.print("Direction: ");
-  display.println(sensors.getEdgeDirection());
-  
-  // 數據新鮮度
-  display.setCursor(0, 52);
-  display.print("Data: ");
-  display.println(sensors.isDataFresh() ? "FRESH" : "STALE");
-  
-  display.display();
-}
-
-// 主要 OLED 更新函數 - 根據系統狀態選擇顯示內容
-void updateOLEDDisplay(QRE_AllSensors &sensors, SumoAction action) {
-  static int displayMode = 0;  // 0: 系統狀態, 1: 戰術狀態
-  static unsigned long lastModeSwitch = 0;
-  
-  // 每 4 秒切換顯示模式
-  if (millis() - lastModeSwitch > 4000) {
-    displayMode = (displayMode + 1) % 2;
-    lastModeSwitch = millis();
-  }
-  
-  // 如果檢測到邊緣，強制顯示戰術狀態
-  if (sensors.isEdgeDetected()) {
-    showTacticalStatus(action, sensors);
-  } else {
-    // 正常情況下輪換顯示
-    if (displayMode == 0) {
-      showSystemStatus(sensors);
-    } else {
-      showTacticalStatus(action, sensors);
-    }
-  }
 }
 
 // ========== 感測器讀取函數 ==========
@@ -696,11 +552,6 @@ void loop() {
     Serial.println(" Hz");
     Serial.println();
     
-    // 更新 OLED 顯示 (控制更新頻率)
-    if (millis() - lastOLEDUpdate > OLED_UPDATE_INTERVAL) {
-      updateOLEDDisplay(all_sensors, action);
-      lastOLEDUpdate = millis();
-    }
   } else {
     // 快速循環：只顯示關鍵資訊
     Serial.print("C0-");
