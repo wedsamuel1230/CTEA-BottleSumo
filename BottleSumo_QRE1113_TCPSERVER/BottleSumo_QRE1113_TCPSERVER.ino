@@ -118,7 +118,6 @@ struct WiFiCredentials {
 
 // WiFi 網路列表（按照信號強度排序，強的在前）
 WiFiCredentials wifiNetworks[] = {
-  {"ChanNetwork","69328571"},
   {"infinite inspirit", "password"}, // 如果需要可以設定密碼
   // 您可以在此添加更多網路...
 };
@@ -318,7 +317,7 @@ void setup() {
   // 初始化共享數據
   shared_data.data_ready = false;
   shared_data.timestamp = 0;
-  
+  /*
   // Initialize OLED display
   Serial.println("Initializing OLED Display...");
   if (initOLEDDisplay()) {
@@ -327,7 +326,7 @@ void setup() {
   } else {
     Serial.println("⚠️ OLED Display Initialization Failed");
   }
-  
+  */
   // Initialize WiFi and TCP server
   Serial.println("Initializing WiFi Connection...");
   if (initWiFiAndServer()) {
@@ -380,7 +379,7 @@ bool initSensorSystem() {
   
   return true;
 }
-
+/*
 // 初始化 OLED 顯示器
 bool initOLEDDisplay() {
   // 初始化 I2C 用於 OLED (使用指定引腳)
@@ -400,7 +399,7 @@ bool initOLEDDisplay() {
   
   return true;
 }
-
+*/
 // Initialize WiFi connection and TCP server
 bool initWiFiAndServer() {
   Serial.println("=== WiFi TCP Server Startup ===");
@@ -915,7 +914,7 @@ String sensorReadingsToStatus(QRE_AllSensors &sensors) {
 }
 
 // ========== OLED 顯示函數 ==========
-
+/*
 // 顯示啟動畫面
 void showStartupScreen() {
   display.clearDisplay();
@@ -1015,7 +1014,7 @@ void updateOLEDDisplay(QRE_AllSensors &sensors) {
   
   display.display();
 }
-
+*/
 // ========== 感測器讀取函數 ==========
 
 // Core 1 專用：更新共享數據
@@ -1224,7 +1223,7 @@ void loop() {
   
   // 每 50 次循環更新 OLED 顯示（避免過度頻繁更新）
   if (loop_count % 50 == 0) {
-    updateOLEDDisplay(all_sensors);
+    //updateOLEDDisplay(all_sensors);
   } else {
     // 快速循環：只顯示關鍵資訊
     Serial.print("C0-");
