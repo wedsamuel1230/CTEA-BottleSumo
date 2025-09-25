@@ -118,6 +118,7 @@ struct WiFiCredentials {
 
 // WiFi 網路列表（按照信號強度排序，強的在前）
 WiFiCredentials wifiNetworks[] = {
+  {"ChanNetwork","69328571"},
   {"infinite inspirit", "password"}, // 如果需要可以設定密碼
   // 您可以在此添加更多網路...
 };
@@ -140,6 +141,21 @@ const unsigned long WIFI_CHECK_INTERVAL = 30000;  // 30秒檢查一次 WiFi 狀�
 // TCP 客戶端管理
 unsigned long lastDataSend = 0;
 const unsigned long DATA_SEND_INTERVAL = 100;     // 100ms 發送間隔 (10Hz)
+unsigned long lastTCPCheck = 0;
+const unsigned long TCP_CHECK_INTERVAL = 50;      // 50ms TCP檢查間隔 (20Hz)
+
+// 多客戶端連接池 (Truly Non-Blocking Design)
+const int MAX_TCP_CLIENTS = 4;                     // 最大同時連接數
+struct TCPClientState {
+  WiFiClient client;                               // WiFi客戶端對象
+  String commandBuffer;                            // 命令緩衝區
+  unsigned long connectTime;                       // 連接時間
+  unsigned long lastActivity;                      // 最後活動時間
+  bool isActive;                                   // 連接狀態
+};
+
+TCPClientState tcpClients[MAX_TCP_CLIENTS];        // 客戶端連接池
+const unsigned long CLIENT_TIMEOUT = 300000;      // 5分鐘客戶端超時
 
 // ========== 雙核心支援 ==========
 
@@ -265,6 +281,7 @@ struct QRE_AllSensors {
 // ========== 函數宣告 ==========
 void showStartupScreen();
 void handleTCPClients(QRE_AllSensors &sensors);
+void processClientCommand(WiFiClient &client, String command, QRE_AllSensors &sensors, int clientSlot);
 void sendSensorData(WiFiClient &client, QRE_AllSensors &sensors);
 void sendSensorJSON(WiFiClient &client, QRE_AllSensors &sensors);
 void sendSystemStatus(WiFiClient &client);
@@ -556,9 +573,10 @@ void handleWiFiAndTCP(QRE_AllSensors &sensors) {
     lastWiFiCheck = currentTime;
   }
   
-  // 如果 WiFi 已連接，處理 TCP 伺服器（非阻塞設計）
-  if (wifiConnected) {
+  // 如果 WiFi 已連接，處理 TCP 伺服器（非阻塞設計 + 頻率限制）
+  if (wifiConnected && (currentTime - lastTCPCheck >= TCP_CHECK_INTERVAL)) {
     handleTCPClients(sensors);
+    lastTCPCheck = currentTime;
   }
 }
 
@@ -633,70 +651,138 @@ void checkWiFiConnection() {
   }
 }
 
-// 處理 TCP 客戶端連接和數據傳輸（完全非阻塞版本）
+// 處理 TCP 客戶端連接和數據傳輸（真正非阻塞多客戶端版本）
 void handleTCPClients(QRE_AllSensors &sensors) {
-  // 檢查是否有新的客戶端連接 (完全非阻塞)
-  WiFiClient client = tcpServer.accept();
-  if (!client) {
-    return; // 沒有客戶端連接，立即返回
-  }
-  
-  Serial.printf("🔗 新客戶端連接: %s\n", client.remoteIP().toString().c_str());
-  
-  // 發送歡迎訊息 (使用英文避免編碼問題)
-  client.println("=== Bottle Sumo Robot TCP Server ===");
-  client.println("Commands:");
-  client.println("  'data' - Text format sensor data");
-  client.println("  'json' - JSON format sensor data");  
-  client.println("  'status' - System status");
-  client.println("  'help' - Command help");
-  client.println("  'ping' - Connection test");
-  client.print("> ");
-  
-  // 完全非阻塞的請求處理（最多檢查1秒）
-  unsigned long startTime = millis();
-  const unsigned long MAX_WAIT_TIME = 3000; // 降低到1秒，減少對主迴圈的影響
-  
-  while (!client.available() && (millis() - startTime) < MAX_WAIT_TIME) {
-    delay(10); // 短暫延遲，允許其他任務執行
-    
-    // 每100ms輸出一次等待狀態，避免長時間阻塞
-    if ((millis() - startTime) % 100 == 0) {
-      // 可以在這裡添加心跳或其他輕量處理
+  // 第1步: 檢查新的客戶端連接 (完全非阻塞)
+  WiFiClient newClient = tcpServer.accept();
+  if (newClient) {
+    // 尋找空閒的客戶端插槽
+    int freeSlot = -1;
+    for (int i = 0; i < MAX_TCP_CLIENTS; i++) {
+      if (!tcpClients[i].isActive) {
+        freeSlot = i;
+        break;
+      }
     }
-  }
-  
-  if (client.available()) {
-    String command = client.readStringUntil('\n');
-    command.trim();
-    command.toLowerCase(); // 統一轉為小寫
     
-    Serial.printf("📨 收到指令: '%s'\n", command.c_str());
-    
-    // 快速指令處理
-    if (command == "data") {
-      sendSensorData(client, sensors);
-    } else if (command == "json") {
-      sendSensorJSON(client, sensors);
-    } else if (command == "status") {
-      sendSystemStatus(client);
-    } else if (command == "help") {
-      sendHelpInfo(client);
-    } else if (command == "ping") {
-      client.println("PONG - Server is alive!");
-      client.printf("WiFi Signal: %d dBm\n", WiFi.RSSI());
-      client.printf("Free Heap: %d bytes\n", rp2040.getFreeHeap());
+    if (freeSlot != -1) {
+      // 初始化新客戶端
+      tcpClients[freeSlot].client = newClient;
+      tcpClients[freeSlot].commandBuffer = "";
+      tcpClients[freeSlot].connectTime = millis();
+      tcpClients[freeSlot].lastActivity = millis();
+      tcpClients[freeSlot].isActive = true;
+      
+      Serial.printf("🔗 新客戶端連接 [插槽%d]: %s\n", freeSlot, newClient.remoteIP().toString().c_str());
+      
+      // 發送歡迎訊息 (使用英文避免編碼問題)
+      newClient.println("=== Bottle Sumo Robot TCP Server ===");
+      newClient.println("Persistent connection established. Commands:");
+      newClient.println("  'data' - Text format sensor data");
+      newClient.println("  'json' - JSON format sensor data");  
+      newClient.println("  'status' - System status");
+      newClient.println("  'help' - Command help");
+      newClient.println("  'ping' - Connection test");
+      newClient.println("  'quit' - Close connection");
+      newClient.print("> ");
     } else {
-      client.println("Unknown command. Type 'help' for available commands.");
+      // 服務器滿載，拒絕連接
+      newClient.println("Server full. Maximum " + String(MAX_TCP_CLIENTS) + " clients supported.");
+      newClient.stop();
+      Serial.println("❌ 服務器滿載，拒絕新連接");
     }
-  } else {
-    client.println("Request timeout (1 second). Connection will close.");
-    Serial.println("⏰ Client request timeout");
   }
   
-  // 立即關閉連接，釋放資源
-  client.stop();
-  Serial.println("🔌 客戶端連接已關閉");
+  // 第2步: 處理所有活躍客戶端 (完全非阻塞)
+  for (int i = 0; i < MAX_TCP_CLIENTS; i++) {
+    if (!tcpClients[i].isActive) continue;
+    
+    WiFiClient &client = tcpClients[i].client;
+    
+    // 檢查客戶端是否仍然連接
+    if (!client.connected()) {
+      Serial.printf("🔌 客戶端 [插槽%d] 已斷開\n", i);
+      tcpClients[i].isActive = false;
+      client.stop();
+      continue;
+    }
+    
+    // 檢查客戶端超時 (5分鐘無活動)
+    if (millis() - tcpClients[i].lastActivity > CLIENT_TIMEOUT) {
+      Serial.printf("⏰ 客戶端 [插槽%d] 超時斷開\n", i);
+      client.println("Connection timeout. Goodbye!");
+      client.stop();
+      tcpClients[i].isActive = false;
+      continue;
+    }
+    
+    // 立即檢查是否有可用數據 (非阻塞)
+    if (client.available()) {
+      tcpClients[i].lastActivity = millis();
+      
+      // 讀取可用字符並添加到緩衝區
+      while (client.available()) {
+        char c = client.read();
+        if (c == '\n' || c == '\r') {
+          // 命令結束，處理完整命令
+          if (tcpClients[i].commandBuffer.length() > 0) {
+            processClientCommand(client, tcpClients[i].commandBuffer, sensors, i);
+            tcpClients[i].commandBuffer = "";
+            client.print("> "); // 顯示新的提示符
+          }
+        } else if (c >= 32 && c <= 126) { // 可打印字符
+          tcpClients[i].commandBuffer += c;
+        }
+      }
+    }
+  }
+}
+
+// 處理客戶端命令 (支持持久連接)
+void processClientCommand(WiFiClient &client, String command, QRE_AllSensors &sensors, int clientSlot) {
+  command.trim();
+  command.toLowerCase(); // 統一轉為小寫
+  
+  Serial.printf("📨 客戶端[%d] 指令: '%s'\n", clientSlot, command.c_str());
+  
+  // 快速指令處理
+  if (command == "data") {
+    sendSensorData(client, sensors);
+  } else if (command == "json") {
+    sendSensorJSON(client, sensors);
+  } else if (command == "status") {
+    sendSystemStatus(client);
+  } else if (command == "help") {
+    sendHelpInfo(client);
+  } else if (command == "ping") {
+    client.println("PONG - Server is alive!");
+    client.printf("WiFi Signal: %d dBm\n", WiFi.RSSI());
+    client.printf("Free Heap: %d bytes\n", rp2040.getFreeHeap());
+    client.printf("Client Slot: %d, Uptime: %lu ms\n", clientSlot, millis() - tcpClients[clientSlot].connectTime);
+  } else if (command == "quit" || command == "exit") {
+    client.println("Goodbye!");
+    client.stop();
+    tcpClients[clientSlot].isActive = false;
+    Serial.printf("👋 客戶端[%d] 主動斷開連接\n", clientSlot);
+    return; // 不顯示提示符
+  } else if (command == "clients") {
+    // 顯示當前連接的客戶端信息
+    client.println("=== Active TCP Clients ===");
+    int activeCount = 0;
+    for (int i = 0; i < MAX_TCP_CLIENTS; i++) {
+      if (tcpClients[i].isActive) {
+        client.printf("Slot %d: %s (connected %lu ms ago)\n", 
+                     i, 
+                     tcpClients[i].client.remoteIP().toString().c_str(),
+                     millis() - tcpClients[i].connectTime);
+        activeCount++;
+      }
+    }
+    client.printf("Total: %d/%d clients\n", activeCount, MAX_TCP_CLIENTS);
+    client.println("========================");
+  } else {
+    client.println("Unknown command. Type 'help' for available commands.");
+  }
 }
 
 // ========== TCP 數據傳輸函數 ==========
@@ -726,12 +812,39 @@ void sendSensorJSON(WiFiClient &client, QRE_AllSensors &sensors) {
   localData = sensors;
   mutex_exit(&data_mutex);
   
+  // 決定機器人行動狀態
+  SumoAction currentAction = decideSumoAction(localData);
+  String actionString = "";
+  switch(currentAction) {
+    case SEARCH_OPPONENT:
+      actionString = "SEARCH_OPPONENT";
+      break;
+    case ATTACK_FORWARD:
+      actionString = "ATTACK_FORWARD";
+      break;
+    case RETREAT_AND_TURN:
+      actionString = "RETREAT_AND_TURN";
+      break;
+    case EMERGENCY_REVERSE:
+      actionString = "EMERGENCY_REVERSE";
+      break;
+    default:
+      actionString = "UNKNOWN";
+      break;
+  }
+  
   // 構建 JSON 字符串
   String json = "{";
   json += "\"timestamp\":" + String(millis()) + ",";
   json += "\"sensors\":{";
   json += "\"raw\":[" + String(localData.sensor[0].raw_value) + "," + String(localData.sensor[1].raw_value) + "," + String(localData.sensor[2].raw_value) + "," + String(localData.sensor[3].raw_value) + "],";
   json += "\"voltage\":[" + String(localData.sensor[0].voltage, 3) + "," + String(localData.sensor[1].voltage, 3) + "," + String(localData.sensor[2].voltage, 3) + "," + String(localData.sensor[3].voltage, 3) + "]";
+  json += "},";
+  json += "\"robot_state\":{";
+  json += "\"action\":\"" + actionString + "\",";
+  json += "\"edge_detected\":" + String(localData.isEdgeDetected() ? "true" : "false") + ",";
+  json += "\"edge_direction\":\"" + localData.getEdgeDirection() + "\",";
+  json += "\"danger_level\":" + String(localData.getDangerLevel());
   json += "},";
   json += "\"wifi_status\":\"" + getWiFiStatusString((wl_status_t)WiFi.status()) + "\",";
   json += "\"uptime\":" + String(millis()) + "";
@@ -751,20 +864,24 @@ void sendSystemStatus(WiFiClient &client) {
   }
   client.printf("Uptime: %lu ms\n", millis());
   client.printf("Free Memory: %d bytes\n", rp2040.getFreeHeap());
-  client.printf("CPU 溫度: %.1f°C\n", analogReadTemp());
-  client.printf("核心 0: 主控制迴圈\n");
-  client.printf("核心 1: 感測器讀取 (目標: 860 Hz)\n");
+  client.printf("CPU Temperature: %.1f°C\n", analogReadTemp());
+  client.printf("Core 0: Main Control loop\n");
+  client.printf("Core 1: Sensor Reading (Target: 860 Hz)\n");
   client.println("===============");
 }
 
 // 發送幫助資訊
 void sendHelpInfo(WiFiClient &client) {
-  client.println("=== 可用指令 ===");
-  client.println("data   - 獲取 QRE1113 感測器數據（純文字格式）");
-  client.println("json   - 獲取感測器數據（JSON 格式）");
-  client.println("status - 獲取系統狀態資訊");
-  client.println("help   - 顯示此幫助資訊");
-  client.println("===============");
+  client.println("=== Persistent TCP Commands ===");
+  client.println("data    - Get QRE1113 sensor data (plain text)");
+  client.println("json    - Get sensor data with robot states (JSON)");
+  client.println("status  - Get system status information");  
+  client.println("ping    - Connection test with system info");
+  client.println("clients - Show all connected TCP clients");
+  client.println("help    - Display this help information");
+  client.println("quit    - Disconnect from server");
+  client.println("================================");
+  client.println("Note: Connection is persistent. No need to reconnect!");
 }
 
 // 根據數位讀數判斷機器人狀態
@@ -1008,36 +1125,36 @@ void executeSumoAction(SumoAction action, QRE_AllSensors &sensors) {
 
 // Bottle Sumo 狀態顯示
 void printSumoStatus(QRE_AllSensors &sensors) {
-  Serial.println("========== Bottle Sumo 雙核心狀態 ==========");
+  Serial.println("========== Bottle Sumo Dual-Core Status ==========");
   
-  // 核心狀態監控
-  Serial.print("Core 0 循環: ");
+  // Core status monitoring
+  Serial.print("Core 0 Loops: ");
   Serial.print(core0_loop_count);
-  Serial.print(" | Core 1 循環: ");
+  Serial.print(" | Core 1 Loops: ");
   Serial.println(core1_loop_count);
   
-  // 數據新鮮度檢查
-  Serial.print("數據狀態: ");
-  Serial.println(sensors.isDataFresh() ? "✅ 新鮮" : "⚠️ 過時");
+  // Data freshness check
+  Serial.print("Data Status: ");
+  Serial.println(sensors.isDataFresh() ? "✅ Fresh" : "⚠️ Stale");
   
-  // 基本感測器資訊
-  String sensor_names[] = {"前左", "前右", "後左", "後右"};
+  // Basic sensor information
+  String sensor_names[] = {"Front-Left", "Front-Right", "Back-Left", "Back-Right"};
   for (int i = 0; i < 4; i++) {
     Serial.print(sensor_names[i]);
     Serial.print(": ");
     Serial.print(sensors.sensor[i].voltage, 2);
     Serial.print("V ");
-    Serial.println(sensors.sensor[i].voltage > 2.5 ? "[邊緣!]" : "[安全]");
+    Serial.println(sensors.sensor[i].voltage > 2.5 ? "[EDGE!]" : "[SAFE]");
   }
   
-  // Sumo 專用分析
-  Serial.print("邊緣檢測: ");
-  Serial.println(sensors.isEdgeDetected() ? "⚠️ 檢測到!" : "✅ 安全");
+  // Sumo specialized analysis
+  Serial.print("Edge Detection: ");
+  Serial.println(sensors.isEdgeDetected() ? "⚠️ Detected!" : "✅ Safe");
   
-  Serial.print("危險方向: ");
+  Serial.print("Danger Direction: ");
   Serial.println(sensors.getEdgeDirection());
   
-  Serial.print("危險等級: ");
+  Serial.print("Danger Level: ");
   Serial.print(sensors.getDangerLevel());
   Serial.println("/4");
   
