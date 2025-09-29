@@ -1,0 +1,23 @@
+# LaTeX auxiliary files
+*.aux
+*.log
+*.out
+*.toc
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+
+# Keep the important files
+!BottleSumo_Analysis.tex
+!BottleSumo_Analysis.pdf
+!README_Analysis.md
+
+# IDE and system files
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*~
+*.swp
+*.tmp
