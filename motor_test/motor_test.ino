@@ -6,12 +6,9 @@ To power the motor, connect the VCC and the GND  to the power supply, and turn t
 const uint8_t LeftMotorPWM = 0; //pwm speed control
 const uint8_t RightMotorPWM = 1; //pwm speed control
 const uint8_t WhitePin = 16; //pwm speed control
-const uint8_t btn = 3 //for testing only
+const uint8_t btn = 3; //for testing only
 
-void move_straight(uint8_t speed_for_Motor1,uint8_t speed_for_motor2){
-	analogWrite(LeftMotorPWM,speed_for_Motor1);
-	analogWrite(RightMotorPWM,speed_for_motor2);
-}
+
 
 void setup() {
   Serial.begin(9600);
@@ -21,14 +18,18 @@ void setup() {
   pinMode(btn, INPUT_PULLUP);
 }
 
-void setup1(){
+void move_straight(uint8_t speed_for_Motor1 = 0,uint8_t speed_for_motor2 = 0){
+	analogWrite(LeftMotorPWM,speed_for_Motor1);
+	analogWrite(RightMotorPWM,speed_for_motor2);
 }
-
 void loop() {
   if (digitalRead(btn) == LOW){
-    move_straight(0,0);
+    move_straight(255,255);
   }
-
+  else {
+    move_straight();
+  }
+  delay(50);
   /*
 	move_straight(0,0);//full speed
 	delay(2500);
@@ -38,17 +39,3 @@ void loop() {
 	delay(2500);
   */
 }
-
-/*
-void loop1(){ //using 2nd core in rasberry pi pico 
-  //look if the button pressed
-  if (digitalRead(btn) == LOW){z
-    digitalWrite(WhitePin, LOW); //turn the motor anti-clockwise
-    Serial.println(F("Anti-clockwise"));
-  }
-  else {
-    digitalWrite(WhitePin, HIGH);//turn the motor clockwise
-  }
-  delay(50);
-}
-*/
