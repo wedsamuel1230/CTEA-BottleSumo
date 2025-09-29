@@ -4,7 +4,7 @@
  * 
  * 系統架構:
  * Core 0 (主核心): 馬達控制、戰術邏輯、串口通訊、OLED 顯示、WiFi/TCP 即時串流
- * Core 1 (次核心): 專門負責感測器讀取，提供即時數據 (~860 Hz)
+ * Core 1 (次核心): 專門負責感測器讀取，提供即時數據 (155.5Hz)
  * 
  * Real-Time Streaming 特色:
  * - 持續串流感測器數據和機器人狀態 (10-20Hz)
@@ -14,7 +14,7 @@
  * - 自動連線管理和斷線重連
  * 
  * 性能優化:
- * - Core 1: 高速感測器讀取 (~860 Hz)，不受網路影響
+ * - Core 1: 高速感測器讀取 (155.5Hz)，不受網路影響
  * - Core 0: 邏輯處理 (~100 Hz)、即時串流 (10-20 Hz)
  * - OLED 顯示器: 5Hz 更新，包含 WiFi 狀態和系統資訊
  * - 數據同步: mutex 確保線程安全
@@ -503,7 +503,7 @@ void printSystemInfo() {
   Serial.println("Real-Time Streaming System Specifications:");
   Serial.println("- Processor: Dual-Core RP2040");
   Serial.println("- Core 0: Motor Control & Real-Time Data Streaming");
-  Serial.println("- Core 1: High-Speed Sensor Reading (~860Hz)");
+  Serial.println("- Core 1: High-Speed Sensor Reading (~155.5Hz)");
   Serial.println("- ADC: ADS1115 16-bit");
   Serial.println("- I2C: 400kHz Fast Mode (Dual Channel)");
   Serial.println("- Sensors: 4x QRE1113");
@@ -814,7 +814,7 @@ void showStartupScreen() {
   display.setCursor(0, 25);
   display.println("Core 0: Streaming");
   display.setCursor(0, 35);
-  display.println("Core 1: Sensors 860Hz");
+  display.println("Core 1: Sensors 155.5Hz");
   
   // 硬體信息
   display.setCursor(0, 45);

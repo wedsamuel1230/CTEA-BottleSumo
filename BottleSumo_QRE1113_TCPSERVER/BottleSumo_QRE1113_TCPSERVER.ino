@@ -4,10 +4,10 @@
  * 
  * 系統架構:
  * Core 0 (主核心): 馬達控制、戰術邏輯、串口通訊、OLED 顯示、WiFi/TCP 伺服器
- * Core 1 (次核心): 專門負責感測器讀取，提供即時數據 (~860 Hz)
+ * Core 1 (次核心): 專門負責感測器讀取，提供即時數據 (155.5Hz)
  * 
  * 性能優化:
- * - Core 1: 高速感測器讀取 (~860 Hz)，不受網路影響
+ * - Core 1: 高速感測器讀取 (155.5Hz)，不受網路影響
  * - Core 0: 邏輯處理 (~100 Hz)、WiFi/TCP 處理 (~20 Hz)
  * - OLED 顯示器: 2Hz 更新，包含 WiFi 狀態和系統資訊
  * - WiFi 診斷: 30秒檢查間隔，自動重連機制
@@ -78,7 +78,7 @@
  * print(data.decode())
  * s.close()
  * 
- * 性能: Core 1 ~860 Hz 感測器讀取, Core 0 ~100 Hz 控制循環, OLED 5Hz 更新
+ * 性能: Core 1 155.5Hz 感測器讀取, Core 0 ~100 Hz 控制循環, OLED 5Hz 更新
  * 作者: CTEA-BottleSumo 專案 - 雙核心 + OLED 版本
  * 日期: 2025-09-23
  */
@@ -118,7 +118,7 @@ struct WiFiCredentials {
 
 // WiFi 網路列表（按照信號強度排序，強的在前）
 WiFiCredentials wifiNetworks[] = {
-  {"infinite inspirit", "password"}, // 如果需要可以設定密碼
+  {"...", "..."}, // 如果需要可以設定密碼
   // 您可以在此添加更多網路...
 };
 
@@ -865,7 +865,7 @@ void sendSystemStatus(WiFiClient &client) {
   client.printf("Free Memory: %d bytes\n", rp2040.getFreeHeap());
   client.printf("CPU Temperature: %.1f°C\n", analogReadTemp());
   client.printf("Core 0: Main Control loop\n");
-  client.printf("Core 1: Sensor Reading (Target: 860 Hz)\n");
+  client.printf("Core 1: Sensor Reading (Target: 155.5Hz)\n");
   client.println("===============");
 }
 
@@ -936,7 +936,7 @@ void showStartupScreen() {
   display.setCursor(0, 25);
   display.println("Core 0: Motor Control");
   display.setCursor(0, 35);
-  display.println("Core 1: Sensors 860Hz");
+  display.println("Core 1: Sensors 155.5Hz");
   
   // 硬體信息
   display.setCursor(0, 45);

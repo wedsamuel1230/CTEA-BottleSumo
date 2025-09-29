@@ -7,8 +7,8 @@ while True:
     if data:
         try:
             json_data = json.loads(data.decode())
-            print(f"Action: {json_data['robot_state']['action']}")
             print(f"Sensors: {json_data['sensors']['voltage']}")
             time.sleep(0.5)
         except:
             pass
+
