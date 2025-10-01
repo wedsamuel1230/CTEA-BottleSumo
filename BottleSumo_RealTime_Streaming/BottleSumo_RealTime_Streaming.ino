@@ -834,7 +834,7 @@ void updateOLEDDisplay(QRE_AllSensors &sensors) {
   display.setTextColor(SSD1306_WHITE);
   
   // 標題行
-  display.setTextSize(1);  
+  display.setTextSize(0.5);  
   // WiFi 狀態行
   display.setCursor(0, 0);
   if (wifiConnected) {
@@ -893,7 +893,7 @@ void updateOLEDDisplay(QRE_AllSensors &sensors) {
   
   // Core 頻率狀態
   display.setCursor(0, 55);
-  display.printf("C0:%.0f C1:%.0f", 
+  display.printf("C0:%.1fHz C1:%.1fHz", 
                  core0_loop_count * 1000.0 / millis(),
                  core1_loop_count * 1000.0 / millis());
   
