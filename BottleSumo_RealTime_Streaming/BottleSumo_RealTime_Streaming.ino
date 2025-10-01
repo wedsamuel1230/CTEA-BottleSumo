@@ -834,9 +834,7 @@ void updateOLEDDisplay(QRE_AllSensors &sensors) {
   display.setTextColor(SSD1306_WHITE);
   
   // 標題行
-  display.setTextSize(1);
-  display.drawLine(0, 9, 128, 9, SSD1306_WHITE);
-  
+  display.setTextSize(1);  
   // WiFi 狀態行
   display.setCursor(0, 0);
   if (wifiConnected) {
@@ -853,16 +851,16 @@ void updateOLEDDisplay(QRE_AllSensors &sensors) {
   }
   
   // 串流狀態
-  display.setCursor(0, 12);
+  display.setCursor(0, 15);
   if (wifiConnected) {
     int activeClients = getActiveClientCount();
-    display.printf("Stream: %dHz [%d clients]", 1000/STREAM_SEND_INTERVAL, activeClients);
+    display.printf("Stream: %dHz %dclients", 1000/STREAM_SEND_INTERVAL, activeClients);
   } else {
     display.print("Stream: DISABLED");
   }
   
   // 機器人狀態
-  display.setCursor(0, 22);
+  display.setCursor(0, 25);
   SumoAction currentAction = decideSumoAction(sensors);
   String actionString = getActionString(currentAction);
   display.print("Action: ");
@@ -874,7 +872,7 @@ void updateOLEDDisplay(QRE_AllSensors &sensors) {
   else display.print("UNKNOWN");
   
   // 感測器狀態
-  display.setCursor(0, 32);
+  display.setCursor(0, 35);
   display.print("Sensors: ");
   for (int i = 0; i < 4; i++) {
     // Simple edge detection: voltage > 2.5V indicates edge detected
@@ -886,15 +884,15 @@ void updateOLEDDisplay(QRE_AllSensors &sensors) {
   }
   
   // 危險等級
-  display.setCursor(70, 32);
+  display.setCursor(85, 35);
   display.printf("D:%d/4", sensors.getDangerLevel());
   
   // 系統狀態行
-  display.setCursor(0, 42);
+  display.setCursor(0, 45);
   display.printf("Uptime: %lus", millis()/1000);
   
   // Core 頻率狀態
-  display.setCursor(0, 52);
+  display.setCursor(0, 55);
   display.printf("C0:%.0f C1:%.0f", 
                  core0_loop_count * 1000.0 / millis(),
                  core1_loop_count * 1000.0 / millis());
