@@ -170,6 +170,8 @@ void setup() {
   Wire1.setSCL(27);
   Wire1.begin();
 
+  scanI2C();
+
   Serial.println("Initializing ULTRA FAST ToF sensors...");
   if (!init_tof_sensors()) {
     Serial.println("ToF sensor initialization failed!");

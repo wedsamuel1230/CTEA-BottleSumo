@@ -88,7 +88,6 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <WiFi.h>
-#include "Adafruit_VL53L0X.h"
 
 // ========== OLED 顯示器配置 ==========
 
@@ -107,16 +106,6 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire1, OLED_RESET);
 // OLED 更新控制
 unsigned long lastOLEDUpdate = 0;
 const unsigned long OLED_UPDATE_INTERVAL = 200;  // 200ms 更新間隔（5Hz）
-
-// ========== ToF 感測器配置 (VL53L0X) ==========
-
-// ToF XSHUT 引腳配置（用於個別地址設定）
-#define TOF_XSHUT_RIGHT 11   // GP11 - Right sensor
-#define TOF_XSHUT_FRONT 12   // GP12 - Front sensor  
-#define TOF_XSHUT_LEFT  13   // GP13 - Left sensor
-
-// 創建 ToF 感測器對象
-Adafruit_VL53L0X tof_right, tof_front, tof_left;
 
 // ========== WiFi TCP 即時串流伺服器配置 ==========
 
@@ -173,15 +162,8 @@ const unsigned long CLIENT_TIMEOUT = 300000;               // 5分鐘客戶端�
 
 // 核心間共享數據結構 (使用 volatile 確保數據同步)
 volatile struct SharedSensorData {
-  // IR 感測器數據 (ADS1115)
-  int16_t raw_values[4];      // IR 感測器原始值
-  float voltages[4];          // IR 感測器電壓值
-  
-  // ToF 感測器數據 (VL53L0X)
-  uint16_t tof_distances[3];  // ToF 距離 [右, 前, 左] (mm)
-  bool tof_valid[3];          // ToF 數據有效性標誌
-  uint8_t tof_status[3];      // ToF 狀態碼
-  
+  int16_t raw_values[4];      // 感測器原始值
+  float voltages[4];          // 感測器電壓值
   bool data_ready;            // 數據準備標誌
   unsigned long timestamp;    // 時間戳
 } shared_data;
@@ -283,58 +265,6 @@ struct QRE_AllSensors {
   }
 };
 
-// ========== ToF 感測器數據結構 ==========
-
-// ToF 感測器讀數結構體
-struct ToF_Reading {
-  uint16_t right_distance;  // 右側距離 (mm)
-  uint16_t front_distance;  // 前方距離 (mm)
-  uint16_t left_distance;   // 左側距離 (mm)
-  bool right_valid;         // 右側數據有效性
-  bool front_valid;         // 前方數據有效性
-  bool left_valid;          // 左側數據有效性
-  uint8_t right_status;     // 右側狀態碼
-  uint8_t front_status;     // 前方狀態碼
-  uint8_t left_status;      // 左側狀態碼
-  
-  // 從共享數據更新 ToF 數據
-  void updateFromSharedData() {
-    mutex_enter_blocking(&data_mutex);
-    right_distance = shared_data.tof_distances[0];
-    front_distance = shared_data.tof_distances[1];
-    left_distance = shared_data.tof_distances[2];
-    right_valid = shared_data.tof_valid[0];
-    front_valid = shared_data.tof_valid[1];
-    left_valid = shared_data.tof_valid[2];
-    right_status = shared_data.tof_status[0];
-    front_status = shared_data.tof_status[1];
-    left_status = shared_data.tof_status[2];
-    mutex_exit(&data_mutex);
-  }
-  
-  // 獲取對手方向（基於 ToF 感測器）
-  String getObjectDirection(uint16_t detection_threshold = 1600) {
-    String directions = "";
-    
-    if (front_valid && front_distance < detection_threshold) {
-      directions += "FRONT ";
-    }
-    if (right_valid && right_distance < detection_threshold) {
-      directions += "RIGHT ";
-    }
-    if (left_valid && left_distance < detection_threshold) {
-      directions += "LEFT ";
-    }
-    
-    if (directions.length() == 0) {
-      return "CLEAR";
-    }
-    
-    directions.trim();
-    return directions;
-  }
-};
-
 // ========== 全域變數 ==========
 
 Adafruit_ADS1115 ads;  // ADS1115 ADC 物件
@@ -424,67 +354,6 @@ bool initSensorSystem() {
     return false;
   }
   
-  // 初始化 ToF 感測器系統
-  if (!initToFSensors()) {
-    // ToF 初始化失敗，但不阻止系統運行
-    Serial.println("⚠️ ToF Sensors Initialization Failed - Continuing without ToF");
-  }
-  
-  return true;
-}
-
-// 初始化 ToF 感測器 (VL53L0X)
-bool initToFSensors() {
-  Serial.println("Initializing ToF Sensors (VL53L0X)...");
-  
-  // 配置 XSHUT 引腳為輸出
-  pinMode(TOF_XSHUT_RIGHT, OUTPUT);
-  pinMode(TOF_XSHUT_FRONT, OUTPUT);
-  pinMode(TOF_XSHUT_LEFT, OUTPUT);
-  
-  // 關閉所有感測器
-  digitalWrite(TOF_XSHUT_RIGHT, LOW);
-  digitalWrite(TOF_XSHUT_FRONT, LOW);
-  digitalWrite(TOF_XSHUT_LEFT, LOW);
-  delay(30);  // 等待感測器完全關閉
-  
-  // 初始化右側感測器 (0x30)
-  digitalWrite(TOF_XSHUT_RIGHT, HIGH);
-  delay(20);
-  if (!tof_right.begin(0x30, false, &Wire1)) {
-    Serial.println("❌ Failed to init RIGHT ToF sensor");
-    return false;
-  }
-  tof_right.setMeasurementTimingBudgetMicroSeconds(20000);  // 20ms 超快速模式
-  tof_right.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_PRE_RANGE, 18);
-  tof_right.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_FINAL_RANGE, 14);
-  Serial.println("✓ Right ToF sensor: ULTRA FAST mode (20ms)");
-  
-  // 初始化前方感測器 (0x31)
-  digitalWrite(TOF_XSHUT_FRONT, HIGH);
-  delay(20);
-  if (!tof_front.begin(0x31, false, &Wire1)) {
-    Serial.println("❌ Failed to init FRONT ToF sensor");
-    return false;
-  }
-  tof_front.setMeasurementTimingBudgetMicroSeconds(20000);
-  tof_front.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_PRE_RANGE, 18);
-  tof_front.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_FINAL_RANGE, 14);
-  Serial.println("✓ Front ToF sensor: ULTRA FAST mode (20ms)");
-  
-  // 初始化左側感測器 (0x32)
-  digitalWrite(TOF_XSHUT_LEFT, HIGH);
-  delay(20);
-  if (!tof_left.begin(0x32, false, &Wire1)) {
-    Serial.println("❌ Failed to init LEFT ToF sensor");
-    return false;
-  }
-  tof_left.setMeasurementTimingBudgetMicroSeconds(20000);
-  tof_left.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_PRE_RANGE, 18);
-  tof_left.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_FINAL_RANGE, 14);
-  Serial.println("✓ Left ToF sensor: ULTRA FAST mode (20ms)");
-  
-  Serial.println("✓ All ToF Sensors Initialized Successfully");
   return true;
 }
 
@@ -838,25 +707,14 @@ void sendRealTimeStreamToAllClients(QRE_AllSensors &sensors) {
   SumoAction currentAction = decideSumoAction(sensors);
   String actionString = getActionString(currentAction);
   
-  // 獲取 ToF 感測器數據
-  ToF_Reading tof_data = getToFSensorsFromShared();
-  
   // 構建即時串流 JSON 數據包
   String streamData = "{";
   streamData += "\"timestamp\":" + String(millis()) + ",";
   
-  // IR 感測器數據
+  // 感測器數據
   streamData += "\"irsensors\":{";
   streamData += "\"raw\":[" + String(sensors.sensor[0].raw_value) + "," + String(sensors.sensor[1].raw_value) + "," + String(sensors.sensor[2].raw_value) + "," + String(sensors.sensor[3].raw_value) + "],";
   streamData += "\"voltage\":[" + String(sensors.sensor[0].voltage, 3) + "," + String(sensors.sensor[1].voltage, 3) + "," + String(sensors.sensor[2].voltage, 3) + "," + String(sensors.sensor[3].voltage, 3) + "]";
-  streamData += "},";
-  
-  // ToF 感測器數據
-  streamData += "\"tofsensors\":{";
-  streamData += "\"distances\":[" + String(tof_data.right_distance) + "," + String(tof_data.front_distance) + "," + String(tof_data.left_distance) + "],";
-  streamData += "\"valid\":[" + String(tof_data.right_valid ? "true" : "false") + "," + String(tof_data.front_valid ? "true" : "false") + "," + String(tof_data.left_valid ? "true" : "false") + "],";
-  streamData += "\"status\":[" + String(tof_data.right_status) + "," + String(tof_data.front_status) + "," + String(tof_data.left_status) + "],";
-  streamData += "\"object_direction\":\"" + tof_data.getObjectDirection() + "\"";
   streamData += "},";
 
   // 機器人狀態
@@ -1049,57 +907,28 @@ void updateSharedSensorData() {
   static int16_t raw_values[4];
   static float voltages[4];
   
-  // 讀取所有 IR 感測器
+  // 讀取所有感測器
   for (int i = 0; i < 4; i++) {
     raw_values[i] = ads.readADC_SingleEnded(i);
     voltages[i] = ads.computeVolts(raw_values[i]);
   }
   
-  // 讀取 ToF 感測器
-  static VL53L0X_RangingMeasurementData_t tof_data_right, tof_data_front, tof_data_left;
-  tof_right.rangingTest(&tof_data_right, false);
-  tof_front.rangingTest(&tof_data_front, false);
-  tof_left.rangingTest(&tof_data_left, false);
-  
   // 更新共享數據 (使用互斥鎖確保數據完整性)
   mutex_enter_blocking(&data_mutex);
-  
-  // 更新 IR 數據
   for (int i = 0; i < 4; i++) {
     shared_data.raw_values[i] = raw_values[i];
     shared_data.voltages[i] = voltages[i];
   }
-  
-  // 更新 ToF 數據 (索引: 0=右, 1=前, 2=左)
-  shared_data.tof_valid[0] = (tof_data_right.RangeStatus <= 4 && tof_data_right.RangeMilliMeter < 2000);
-  shared_data.tof_distances[0] = shared_data.tof_valid[0] ? tof_data_right.RangeMilliMeter : 0;
-  shared_data.tof_status[0] = tof_data_right.RangeStatus;
-  
-  shared_data.tof_valid[1] = (tof_data_front.RangeStatus <= 4 && tof_data_front.RangeMilliMeter < 2000);
-  shared_data.tof_distances[1] = shared_data.tof_valid[1] ? tof_data_front.RangeMilliMeter : 0;
-  shared_data.tof_status[1] = tof_data_front.RangeStatus;
-  
-  shared_data.tof_valid[2] = (tof_data_left.RangeStatus <= 4 && tof_data_left.RangeMilliMeter < 2000);
-  shared_data.tof_distances[2] = shared_data.tof_valid[2] ? tof_data_left.RangeMilliMeter : 0;
-  shared_data.tof_status[2] = tof_data_left.RangeStatus;
-  
   shared_data.timestamp = millis();
   shared_data.data_ready = true;
   mutex_exit(&data_mutex);
 }
 
-// Core 0 專用：從共享數據獲取 IR 感測器資訊
+// Core 0 專用：從共享數據獲取感測器資訊
 QRE_AllSensors getAllSensorsFromShared() {
   QRE_AllSensors all_sensors;
   all_sensors.updateFromSharedData();
   return all_sensors;
-}
-
-// Core 0 專用：從共享數據獲取 ToF 感測器資訊
-ToF_Reading getToFSensorsFromShared() {
-  ToF_Reading tof_reading;
-  tof_reading.updateFromSharedData();
-  return tof_reading;
 }
 
 // ========== Bottle Sumo 戰術函數 ==========
