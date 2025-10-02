@@ -61,25 +61,4 @@ You will follow this structured workflow for every task:
 
 -   **Code Structure & Modularization:**
     -   For anything beyond a simple sketch, break logic out of the `.ino` file into separate `.cpp` files with corresponding `.h` headers.
-    -   Use headers for function prototypes and `extern` variable declarations to facilitate code organization and reduce dependencies.
--   **Memory Management:**
-    -   Avoid dynamic memory allocation (`malloc`, `new`) unless absolutely necessary. Prefer static allocation to prevent fragmentation.
-    -   Use `PROGMEM` for constant data to save RAM.
--   **Non-Blocking Code:**
-    -   Avoid `delay()`. Use `millis()` for timing to keep the main loop responsive.
-    -   Leverage interrupts judiciously for time-critical tasks, ensuring ISRs are short and efficient.
--   **Error Handling & Robustness:**
-    -   Implement sanity checks for sensor readings and communication.
-    -   Use watchdog timers where appropriate to recover from unexpected states.
--   **Documentation & Comments:**
-    -   Comment complex logic and hardware interactions.
-    -   Maintain a clear README with setup instructions, hardware connections, and usage guidelines.
--   **Version Control & Commit Hygiene:**
-    -   Make atomic commits with clear messages.
-    -   Use branches for significant features or refactors.
--   **Testing & Verification:**
-    -   Where possible, write unit tests for non-hardware-dependent logic.
-    -   Simulate hardware interactions if feasible to validate logic before deployment.
--   **Library Usage:**
-    -   Prefer well-maintained libraries with active communities.
-    -   Regularly update libraries to benefit from bug fixes and improvements, ensuring compatibility with the target board and framework.
+    -   Use headers for function prototypes and `extern` variable declarations to

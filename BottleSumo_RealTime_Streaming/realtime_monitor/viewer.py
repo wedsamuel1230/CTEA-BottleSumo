@@ -20,7 +20,7 @@ from tkinter import messagebox, ttk
 from typing import Any, Dict, Optional
 
 # Default connection settings that match the firmware (`TCP_SERVER_PORT = 4242`).
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "10.30.213.47"
 DEFAULT_PORT = 4242
 
 # Socket settings.
@@ -35,17 +35,30 @@ class TelemetryPacket:
     timestamp: int = 0
     sensors_raw: list[int] = field(default_factory=list)
     sensors_voltage: list[float] = field(default_factory=list)
+    tof_distances: list[int] = field(default_factory=list)
+    tof_valid: list[bool] = field(default_factory=list)
+    tof_status: list[int] = field(default_factory=list)
+    tof_object_direction: str = ""
     robot_state: Dict[str, Any] = field(default_factory=dict)
     system_info: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_json(cls, payload: Dict[str, Any]) -> "TelemetryPacket":
         """Create a packet from the decoded JSON dictionary."""
-        sensors = payload.get("sensors", {})
+        # IR sensors (legacy name 'sensors' or new name 'irsensors')
+        sensors = payload.get("irsensors", payload.get("sensors", {}))
+        
+        # ToF sensors
+        tofsensors = payload.get("tofsensors", {})
+        
         return cls(
             timestamp=payload.get("timestamp", 0),
             sensors_raw=list(sensors.get("raw", [])),
             sensors_voltage=list(sensors.get("voltage", [])),
+            tof_distances=list(tofsensors.get("distances", [])),
+            tof_valid=list(tofsensors.get("valid", [])),
+            tof_status=list(tofsensors.get("status", [])),
+            tof_object_direction=tofsensors.get("object_direction", ""),
             robot_state=dict(payload.get("robot_state", {})),
             system_info=dict(payload.get("system_info", {})),
         )
@@ -126,13 +139,18 @@ class BottleSumoViewer(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Bottle Sumo Real-Time Viewer")
-        self.geometry("520x550")
-        self.minsize(500, 550)
+        self.geometry("650x700")
+        self.minsize(600, 700)
 
         self._reader_thread: Optional[TelemetryReader] = None
         self._queue: "queue.Queue[TelemetryPacket | Exception]" = queue.Queue()
 
+        # Variables for window dragging
+        self._drag_start_x = 0
+        self._drag_start_y = 0
+
         self._build_ui()
+        self._setup_window_drag()
         self._schedule_queue_processing()
 
     # ------------------------------------------------------------------
@@ -164,25 +182,60 @@ class BottleSumoViewer(tk.Tk):
         sensors_frame = ttk.LabelFrame(root, text="Sensors", padding=8)
         sensors_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
         sensors_frame.columnconfigure(1, weight=1)
+        sensors_frame.columnconfigure(3, weight=1)
 
         ttk.Label(sensors_frame, text="Index").grid(row=0, column=0, padx=4, sticky="w")
         ttk.Label(sensors_frame, text="Raw").grid(row=0, column=1, padx=4, sticky="w")
         ttk.Label(sensors_frame, text="Voltage (V)").grid(row=0, column=2, padx=4, sticky="w")
+        ttk.Label(sensors_frame, text="Level").grid(row=0, column=3, padx=4, sticky="w")
 
         self.sensor_raw_labels: list[tk.StringVar] = []
         self.sensor_voltage_labels: list[tk.StringVar] = []
+        self.sensor_voltage_bars: list[ttk.Progressbar] = []
         for idx in range(4):
             ttk.Label(sensors_frame, text=f"Sensor {idx}").grid(row=idx + 1, column=0, sticky="w", padx=5)
             raw_var = tk.StringVar(value="-")
             volt_var = tk.StringVar(value="-")
             ttk.Label(sensors_frame, textvariable=raw_var).grid(row=idx + 1, column=1, sticky="w", padx=5)
             ttk.Label(sensors_frame, textvariable=volt_var).grid(row=idx + 1, column=2, sticky="w", padx=5)
+            
+            # Add progress bar for voltage visualization (0-3.3V range typical for ESP32)
+            progress_bar = ttk.Progressbar(sensors_frame, mode='determinate', length=150, maximum=3.3)
+            progress_bar.grid(row=idx + 1, column=3, sticky="ew", padx=5)
+            
             self.sensor_raw_labels.append(raw_var)
             self.sensor_voltage_labels.append(volt_var)
+            self.sensor_voltage_bars.append(progress_bar)
+
+        # ToF Sensors data ---------------------------------------------------
+        tof_frame = ttk.LabelFrame(root, text="ToF Sensors (VL53L0X)", padding=8)
+        tof_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        tof_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(tof_frame, text="Direction").grid(row=0, column=0, padx=4, sticky="w")
+        ttk.Label(tof_frame, text="Distance (mm)").grid(row=0, column=1, padx=4, sticky="w")
+        ttk.Label(tof_frame, text="Status").grid(row=0, column=2, padx=4, sticky="w")
+
+        self.tof_distance_labels: list[tk.StringVar] = []
+        self.tof_status_labels: list[tk.StringVar] = []
+        tof_directions = ["Right", "Front", "Left"]
+        
+        for idx, direction in enumerate(tof_directions):
+            ttk.Label(tof_frame, text=direction).grid(row=idx + 1, column=0, sticky="w", padx=5)
+            distance_var = tk.StringVar(value="-")
+            status_var = tk.StringVar(value="-")
+            ttk.Label(tof_frame, textvariable=distance_var).grid(row=idx + 1, column=1, sticky="w", padx=5)
+            ttk.Label(tof_frame, textvariable=status_var).grid(row=idx + 1, column=2, sticky="w", padx=5)
+            self.tof_distance_labels.append(distance_var)
+            self.tof_status_labels.append(status_var)
+
+        self.tof_object_direction_var = tk.StringVar(value="-")
+        ttk.Label(tof_frame, text="Object Direction:").grid(row=4, column=0, sticky="w")
+        ttk.Label(tof_frame, textvariable=self.tof_object_direction_var).grid(row=4, column=1, columnspan=2, sticky="w")
 
         # Robot state --------------------------------------------------------
         state_frame = ttk.LabelFrame(root, text="Robot State", padding=8)
-        state_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        state_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         state_frame.columnconfigure(1, weight=1)
 
         self.action_var = tk.StringVar(value="-")
@@ -203,7 +256,7 @@ class BottleSumoViewer(tk.Tk):
 
         # System info --------------------------------------------------------
         system_frame = ttk.LabelFrame(root, text="System Info", padding=8)
-        system_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        system_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         system_frame.columnconfigure(1, weight=1)
 
         self.timestamp_var = tk.StringVar(value="-")
@@ -229,9 +282,26 @@ class BottleSumoViewer(tk.Tk):
         # Status bar ---------------------------------------------------------
         self.status_var = tk.StringVar(value="Idle")
         status_bar = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, anchor="w")
-        status_bar.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        status_bar.grid(row=5, column=0, sticky="ew", pady=(10, 0))
 
         root.rowconfigure(1, weight=1)
+
+    def _setup_window_drag(self) -> None:
+        """Enable dragging the window by clicking and dragging on the title bar or background."""
+        # Bind to the main window
+        self.bind("<Button-1>", self._start_drag)
+        self.bind("<B1-Motion>", self._on_drag)
+        
+    def _start_drag(self, event) -> None:
+        """Record the starting position for window drag."""
+        self._drag_start_x = event.x
+        self._drag_start_y = event.y
+        
+    def _on_drag(self, event) -> None:
+        """Move the window as the mouse is dragged."""
+        x = self.winfo_x() + (event.x - self._drag_start_x)
+        y = self.winfo_y() + (event.y - self._drag_start_y)
+        self.geometry(f"+{x}+{y}")
 
     # ------------------------------------------------------------------
     # Connection handling
@@ -295,11 +365,35 @@ class BottleSumoViewer(tk.Tk):
         self.timestamp_var.set(f"{packet.timestamp}")
         self.status_var.set(time.strftime("Last update: %H:%M:%S"))
 
+        # Update IR sensor data
         for idx in range(4):
             raw_value = packet.sensors_raw[idx] if idx < len(packet.sensors_raw) else "-"
             volt_value = packet.sensors_voltage[idx] if idx < len(packet.sensors_voltage) else "-"
             self.sensor_raw_labels[idx].set(str(raw_value))
             self.sensor_voltage_labels[idx].set(f"{volt_value:.3f}" if isinstance(volt_value, (float, int)) else str(volt_value))
+            
+            # Update progress bar to reflect voltage (clamp between 0 and 3.3V)
+            if isinstance(volt_value, (float, int)):
+                bar_value = max(0.0, min(3.3, float(volt_value)))
+                self.sensor_voltage_bars[idx]['value'] = bar_value
+            else:
+                self.sensor_voltage_bars[idx]['value'] = 0.0
+
+        # Update ToF sensor data
+        for idx in range(3):
+            distance_value = packet.tof_distances[idx] if idx < len(packet.tof_distances) else "-"
+            valid = packet.tof_valid[idx] if idx < len(packet.tof_valid) else False
+            status = packet.tof_status[idx] if idx < len(packet.tof_status) else "-"
+            
+            if isinstance(distance_value, int) and valid:
+                self.tof_distance_labels[idx].set(f"{distance_value} mm")
+                self.tof_status_labels[idx].set("✓ Valid")
+            else:
+                self.tof_distance_labels[idx].set("-")
+                self.tof_status_labels[idx].set(f"Error ({status})" if status != "-" else "-")
+        
+        # Update ToF object direction
+        self.tof_object_direction_var.set(packet.tof_object_direction if packet.tof_object_direction else "-")
 
         self.action_var.set(packet.robot_state.get("action", "-"))
         self.edge_detected_var.set(str(packet.robot_state.get("edge_detected", "-")))
