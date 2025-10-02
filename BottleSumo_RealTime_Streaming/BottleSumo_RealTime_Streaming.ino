@@ -712,11 +712,11 @@ void sendRealTimeStreamToAllClients(QRE_AllSensors &sensors) {
   streamData += "\"timestamp\":" + String(millis()) + ",";
   
   // 感測器數據
-  streamData += "\"sensors\":{";
+  streamData += "\"irsensors\":{";
   streamData += "\"raw\":[" + String(sensors.sensor[0].raw_value) + "," + String(sensors.sensor[1].raw_value) + "," + String(sensors.sensor[2].raw_value) + "," + String(sensors.sensor[3].raw_value) + "],";
   streamData += "\"voltage\":[" + String(sensors.sensor[0].voltage, 3) + "," + String(sensors.sensor[1].voltage, 3) + "," + String(sensors.sensor[2].voltage, 3) + "," + String(sensors.sensor[3].voltage, 3) + "]";
   streamData += "},";
-  
+
   // 機器人狀態
   streamData += "\"robot_state\":{";
   streamData += "\"action\":\"" + actionString + "\",";

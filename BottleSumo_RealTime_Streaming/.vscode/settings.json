@@ -16,5 +16,7 @@
             "command": "extension.execute",
             "priority": 4
         }
-    ]
+    ],
+    "python.defaultInterpreterPath": "${workspaceFolder}/realtime_monitor/.venv/bin/python",
+    "python.terminal.activateEnvironment": true
 }
