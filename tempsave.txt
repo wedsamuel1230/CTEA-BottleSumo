@@ -87,28 +87,8 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <Adafruit_VL53L0X.h>
 #include <WiFi.h>
 
-#define TIMING_BUDGET_US 20000          // 20ms per reading for ultra-fast mode
-#define VCSEL_PRE_RANGE 18              // Pre-range pulse period (speed optimized)
-#define VCSEL_FINAL_RANGE 14            // Final-range pulse period (speed optimized)
-#define DETECTION_THRESHOLD_MM 1600     // 160cm - sumo ring detection distance
-#define MAX_VALID_RANGE_MM 2000         // Maximum sensor range
-#define MIN_VALID_RANGE_MM 30           // Minimum sensor range (avoid false positives)
-#define LOOP_DELAY_MS 30                // 30ms = ~33Hz update rate
-#define MAX_INIT_RETRIES 3              // Maximum sensor initialization attempts
-
-constexpr uint8_t TOF_RIGHT_ADDRESS = 0x32;
-constexpr uint8_t TOF_FRONT_ADDRESS = 0x34;
-constexpr uint8_t TOF_LEFT_ADDRESS = 0x36;
-constexpr uint8_t TOF_XSHUT_RIGHT_PIN = 11;
-constexpr uint8_t TOF_XSHUT_FRONT_PIN = 12;
-constexpr uint8_t TOF_XSHUT_LEFT_PIN = 13;
-constexpr unsigned long TOF_POST_RESET_DELAY_MS = 20;
-constexpr unsigned long TOF_RESET_DELAY_MS = 20;
-constexpr uint8_t TOF_MAX_VALID_STATUS = 2;
-constexpr unsigned long TOF_DATA_FRESHNESS_MS = 100;
 namespace Config {
   // Hardware configuration
   constexpr int OLED_WIDTH = 128;
@@ -120,10 +100,6 @@ namespace Config {
 
   constexpr uint8_t ADS1115_I2C_ADDRESS = 0x48;
   constexpr uint8_t IR_SENSOR_COUNT = 4;
-  constexpr uint8_t TOF_SENSOR_COUNT = 3;
-  constexpr uint8_t TOF_INDEX_RIGHT = 0;
-  constexpr uint8_t TOF_INDEX_FRONT = 1;
-  constexpr uint8_t TOF_INDEX_LEFT = 2;
 
   // Timing configuration (milliseconds unless noted)
   constexpr unsigned long OLED_UPDATE_INTERVAL_MS = 200;    // 5 Hz
@@ -132,9 +108,8 @@ namespace Config {
   constexpr unsigned long CORE1_STARTUP_DELAY_MS = 100;
   constexpr unsigned long CORE1_WAIT_POLL_DELAY_MS = 10;
   constexpr unsigned long CORE1_FAILURE_HALT_DELAY_MS = 1000;
-  constexpr unsigned long STALE_DATA_DELAY_MS = 5;            // brief pause to let sensors catch up
-  constexpr unsigned long STALE_WARNING_THROTTLE_MS = 1000;   // limit stale warning prints (ms)
-  constexpr unsigned long DATA_FRESHNESS_TOLERANCE_MS = 60;
+  constexpr unsigned long STALE_DATA_DELAY_MS = 5;
+  constexpr unsigned long DATA_FRESHNESS_TOLERANCE_MS = 20;
   constexpr unsigned long STATUS_PRINT_INTERVAL_MS = 5000;
   constexpr int STATUS_PRINT_LOOP_INTERVAL = 100;
   constexpr int OLED_UPDATE_LOOP_INTERVAL = 25;
@@ -144,6 +119,9 @@ namespace Config {
   constexpr unsigned long WIFI_CHECK_INTERVAL_MS = 30000;   // 30 s
   constexpr unsigned long CLIENT_TIMEOUT_MS = 300000;       // 5 min
   constexpr unsigned long WIFI_DISCONNECT_DELAY_MS = 1000;
+  constexpr int WIFI_CONNECT_TIMEOUT_SECONDS = 10;
+  constexpr unsigned long WIFI_RECONNECT_WINDOW_MS = 8000;
+  constexpr unsigned long WIFI_RECONNECT_POLL_DELAY_MS = 300;
   constexpr unsigned long MILLISECONDS_PER_SECOND = 1000UL;
   constexpr float MILLISECONDS_PER_SECOND_F = 1000.0f;
   constexpr uint16_t STREAM_SERVER_PORT = 4242;
@@ -161,13 +139,18 @@ namespace Config {
   constexpr int WIFI_RSSI_GOOD = -60;
   constexpr int WIFI_RSSI_FAIR = -70;
 
+  // ToF configuration
+  constexpr uint8_t TOF_RIGHT_ADDRESS = 0x29;
+  constexpr uint8_t TOF_FRONT_ADDRESS = 0x31;
+  constexpr uint8_t TOF_LEFT_ADDRESS = 0x33;
+  constexpr unsigned long TOF_SHUTDOWN_DELAY_MS = 20;
+  constexpr unsigned long TOF_TIMEOUT_MS = 500;
+  constexpr uint32_t TOF_MEASUREMENT_BUDGET_US = 20000;
+  constexpr uint8_t TOF_VCSEL_PRE_RANGE = 18;
+  constexpr uint8_t TOF_VCSEL_FINAL_RANGE = 14;
+
   constexpr uint8_t I2C_ADDRESS_START = 1;
   constexpr uint8_t I2C_ADDRESS_END = 127;
-
-  // WiFi Access Point configuration
-  constexpr const char* AP_SSID = "BottleSumo_Robot";
-  constexpr const char* AP_PASSWORD = "sumo2025";
-  constexpr uint8_t AP_MAX_CLIENTS = 8;
 }
 
 // 創建 OLED 顯示器對象
@@ -178,13 +161,32 @@ unsigned long lastOLEDUpdate = 0;
 
 // ========== WiFi TCP 即時串流伺服器配置 ==========
 
+// WiFi 網路設定 (請修改為您的網路資訊)
+struct WiFiCredentials {
+  const char* ssid;
+  const char* password;
+};
+
+// WiFi 網路列表
+WiFiCredentials wifiNetworks[] = {
+  {"...","..."},
+  {"ChanNetwork", "69328571"},
+  {"infinite inspirit", "password"},
+  // 您可以在此添加更多網路...
+};
+
+const int numWiFiNetworks = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
+
+// 當前使用的網路設定
+const char* ssid = wifiNetworks[0].ssid;
+const char* password = wifiNetworks[0].password;
+
 // TCP 即時串流伺服器設定
 constexpr int TCP_SERVER_PORT = Config::STREAM_SERVER_PORT;           // TCP 伺服器端口
 WiFiServer tcpServer(TCP_SERVER_PORT);       // 建立 TCP 伺服器物件
 
-// WiFi 狀態監控 (Access Point)
+// WiFi 狀態監控
 bool wifiConnected = false;
-IPAddress apIpAddress;
 unsigned long lastWiFiCheck = 0;
 const unsigned long WIFI_CHECK_INTERVAL = Config::WIFI_CHECK_INTERVAL_MS;  // 30秒檢查一次 WiFi 狀態
 
@@ -216,11 +218,6 @@ volatile struct SharedSensorData {
   float voltages[Config::IR_SENSOR_COUNT];          // 感測器電壓值
   bool data_ready;            // 數據準備標誌
   unsigned long timestamp;    // 時間戳
-  uint16_t tof_distance[Config::TOF_SENSOR_COUNT];  // ToF 距離 (mm)
-  bool tof_valid[Config::TOF_SENSOR_COUNT];         // ToF 讀數是否有效
-  uint8_t tof_status[Config::TOF_SENSOR_COUNT];     // ToF 狀態碼
-  bool tof_data_ready;                              // ToF 數據準備標誌
-  unsigned long tof_timestamp;                      // ToF 時間戳
 } shared_data;
 
 // 互斥鎖 (Mutex) 用於數據同步
@@ -320,85 +317,9 @@ struct QRE_AllSensors {
   }
 };
 
-struct ToFReadings {
-  uint16_t distance[Config::TOF_SENSOR_COUNT] = {0};
-  bool valid[Config::TOF_SENSOR_COUNT] = {false};
-  uint8_t status[Config::TOF_SENSOR_COUNT] = {0};
-  bool data_ready = false;
-  unsigned long timestamp = 0;
-
-  void updateFromSharedData() {
-    mutex_enter_blocking(&data_mutex);
-    if (shared_data.tof_data_ready) {
-      for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-        distance[i] = shared_data.tof_distance[i];
-        valid[i] = shared_data.tof_valid[i];
-        status[i] = shared_data.tof_status[i];
-      }
-      timestamp = shared_data.tof_timestamp;
-      data_ready = true;
-    } else {
-      for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-        distance[i] = shared_data.tof_distance[i];
-        valid[i] = shared_data.tof_valid[i];
-        status[i] = shared_data.tof_status[i];
-      }
-      timestamp = shared_data.tof_timestamp;
-      data_ready = false;
-    }
-    mutex_exit(&data_mutex);
-  }
-
-  bool isDataFresh(unsigned long tolerance_ms = TOF_DATA_FRESHNESS_MS) const {
-    return data_ready && (millis() - timestamp) < tolerance_ms;
-  }
-
-  uint16_t getDistance(uint8_t index) const {
-    if (index < Config::TOF_SENSOR_COUNT) {
-      return distance[index];
-    }
-    return 0;
-  }
-
-  String getDirection(uint16_t detection_threshold = DETECTION_THRESHOLD_MM) const {
-    String direction;
-    if (valid[Config::TOF_INDEX_FRONT] && distance[Config::TOF_INDEX_FRONT] < detection_threshold) {
-      direction += "FRONT ";
-    }
-    if (valid[Config::TOF_INDEX_RIGHT] && distance[Config::TOF_INDEX_RIGHT] < detection_threshold) {
-      direction += "RIGHT ";
-    }
-    if (valid[Config::TOF_INDEX_LEFT] && distance[Config::TOF_INDEX_LEFT] < detection_threshold) {
-      direction += "LEFT ";
-    }
-
-    if (direction.length() == 0) {
-      return "CLEAR";
-    }
-
-    direction.trim();
-    return direction;
-  }
-};
-
 // ========== 全域變數 ==========
 
 Adafruit_ADS1115 ads;  // ADS1115 ADC 物件
-Adafruit_VL53L0X tofSensors[Config::TOF_SENSOR_COUNT];  // ToF 感測器陣列
-bool tofSensorInitialized[Config::TOF_SENSOR_COUNT] = {false};
-volatile bool tofSystemOnline = false;
-
-const uint8_t TOF_XSHUT_PINS[Config::TOF_SENSOR_COUNT] = {
-  TOF_XSHUT_RIGHT_PIN,
-  TOF_XSHUT_FRONT_PIN,
-  TOF_XSHUT_LEFT_PIN
-};
-
-const uint8_t TOF_I2C_ADDRESSES[Config::TOF_SENSOR_COUNT] = {
-  TOF_RIGHT_ADDRESS,
-  TOF_FRONT_ADDRESS,
-  TOF_LEFT_ADDRESS
-};
 
 // ========== Bottle Sumo 控制邏輯 ==========
 
@@ -425,15 +346,6 @@ void setup() {
   // 初始化共享數據
   shared_data.data_ready = false;
   shared_data.timestamp = 0;
-  shared_data.tof_data_ready = false;
-  shared_data.tof_timestamp = 0;
-  for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-    shared_data.tof_distance[i] = 0;
-    shared_data.tof_valid[i] = false;
-    shared_data.tof_status[i] = 0;
-    tofSensorInitialized[i] = false;
-  }
-  tofSystemOnline = false;
   
   // Initialize OLED display
   Serial.println("Initializing OLED Display...");
@@ -493,100 +405,8 @@ bool initSensorSystem() {
   if (!ads.begin(Config::ADS1115_I2C_ADDRESS, &Wire)) {
     return false;
   }
-
-  tofSystemOnline = initToFSensors();
-  if (!tofSystemOnline) {
-    Serial.println(F("⚠️ ToF sensors unavailable; continuing without distance data."));
-  }
   
   return true;
-}
-
-bool initToFSensors() {
-  for (int attempt = 1; attempt <= MAX_INIT_RETRIES; ++attempt) {
-    Serial.printf("ToF Initialization attempt %d/%d\n", attempt, MAX_INIT_RETRIES);
-
-    // Ensure secondary I2C bus is configured (safe to call repeatedly)
-    Wire1.setSDA(Config::OLED_SDA_PIN);
-    Wire1.setSCL(Config::OLED_SCL_PIN);
-    Wire1.begin();
-    Wire1.setClock(Config::I2C_FAST_MODE_HZ);
-
-    // Reset all sensors
-    for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-      pinMode(TOF_XSHUT_PINS[i], OUTPUT);
-      digitalWrite(TOF_XSHUT_PINS[i], LOW);
-      tofSensorInitialized[i] = false;
-    }
-  delay(TOF_RESET_DELAY_MS);
-
-    int availableCount = 0;
-
-    for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-      digitalWrite(TOF_XSHUT_PINS[i], HIGH);
-      delay(TOF_POST_RESET_DELAY_MS);
-
-      if (!tofSensors[i].begin(TOF_I2C_ADDRESSES[i], false, &Wire1)) {
-        Serial.printf("Failed to init ToF sensor %d (address 0x%02X)\n", i, TOF_I2C_ADDRESSES[i]);
-        tofSensorInitialized[i] = false;
-        continue;
-      }
-
-      tofSensors[i].setMeasurementTimingBudgetMicroSeconds(TIMING_BUDGET_US);
-      tofSensors[i].setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_PRE_RANGE, VCSEL_PRE_RANGE);
-      tofSensors[i].setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_FINAL_RANGE, VCSEL_FINAL_RANGE);
-      tofSensorInitialized[i] = true;
-      availableCount++;
-    }
-
-    if (availableCount == Config::TOF_SENSOR_COUNT) {
-      Serial.println("ToF sensors initialized successfully (Ultra Fast mode)");
-      return true;
-    }
-
-    if (availableCount > 0) {
-      Serial.printf("⚠️ ToF degraded: %d/%d sensors online. Missing sensors will be reported as offline.\n",
-                    availableCount, Config::TOF_SENSOR_COUNT);
-      return true;
-    }
-
-    if (attempt < MAX_INIT_RETRIES) {
-      Serial.println("Retrying ToF sensor initialization...");
-      delay(TOF_RESET_DELAY_MS);
-    }
-  }
-
-  Serial.println("CRITICAL: Failed to initialize any ToF sensor after multiple retries");
-  return false;
-}
-
-void readToFSensors(ToFReadings &reading) {
-  bool anySensorActive = false;
-
-  for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-    if (!tofSensorInitialized[i]) {
-      reading.status[i] = 0xFF;  // 0xFF indicates sensor offline
-      reading.valid[i] = false;
-      reading.distance[i] = 0;
-      continue;
-    }
-
-    anySensorActive = true;
-
-    VL53L0X_RangingMeasurementData_t data;
-    tofSensors[i].rangingTest(&data, false);
-
-    reading.status[i] = data.RangeStatus;
-  bool valid = (data.RangeStatus <= TOF_MAX_VALID_STATUS) &&
-         (data.RangeMilliMeter >= MIN_VALID_RANGE_MM) &&
-         (data.RangeMilliMeter < MAX_VALID_RANGE_MM);
-
-    reading.valid[i] = valid;
-    reading.distance[i] = valid ? data.RangeMilliMeter : 0;
-  }
-
-  reading.timestamp = millis();
-  reading.data_ready = anySensorActive;
 }
 
 // 初始化 OLED 顯示器
@@ -609,40 +429,127 @@ bool initOLEDDisplay() {
   return true;
 }
 
-// Initialize WiFi Access Point and Real-Time Streaming TCP server
+// Initialize WiFi connection and Real-Time Streaming TCP server
 bool initWiFiAndStreamingServer() {
-  Serial.println("=== WiFi Access Point Real-Time Streaming Server Startup ===");
-  Serial.printf("AP SSID: '%s'\n", Config::AP_SSID);
-  Serial.printf("AP Password: %s\n", Config::AP_PASSWORD);
+  Serial.println("=== WiFi Real-Time Streaming Server Startup ===");
+  Serial.printf("SSID: '%s'\n", ssid);
   Serial.printf("TCP Streaming Port: %d\n", TCP_SERVER_PORT);
-  Serial.printf("Streaming Rate: %luHz (Every %lums)\n",
+  Serial.printf("Streaming Rate: %luHz (Every %lums)\n", 
                 Config::MILLISECONDS_PER_SECOND / STREAM_SEND_INTERVAL,
                 STREAM_SEND_INTERVAL);
-
-  WiFi.mode(WIFI_AP);
-  bool apStarted = WiFi.softAP(Config::AP_SSID, Config::AP_PASSWORD, 1, 0, Config::AP_MAX_CLIENTS);
-
-  if (!apStarted) {
-    Serial.println("❌ Failed to start WiFi Access Point");
-    wifiConnected = false;
+  
+  // Set WiFi mode to Station
+  WiFi.mode(WIFI_STA);
+  Serial.println("WiFi Mode Set to STA");
+  
+  // Scan available networks (fast version, reduce startup time)
+  Serial.println("Scanning WiFi Networks...");
+  int n = WiFi.scanNetworks();
+  
+  if (n == 0) {
+    Serial.println("❌ No WiFi Networks Found");
     return false;
   }
-
-  apIpAddress = WiFi.softAPIP();
-  Serial.printf("� Access Point Ready | IP: %s\n", apIpAddress.toString().c_str());
-  Serial.println("Connect to the AP and use TCP client to receive streaming data.");
-
+  
+  // Display all available networks (for diagnostics)
+  Serial.printf("📡 Found %d WiFi Networks:\n", n);
+  for (int i = 0; i < n; ++i) {
+    Serial.printf("  %d. '%s' (%d dBm) %s\n", 
+                  i+1, 
+                  WiFi.SSID(i), 
+                  WiFi.RSSI(i),
+                  (WiFi.encryptionType(i) == CYW43_AUTH_OPEN) ? "[Open]" : "[Encrypted]");
+  }
+  
+  // 檢查並嘗試連接可用的WiFi網路
+  bool connected = false;
+  for (int netIdx = 0; netIdx < numWiFiNetworks && !connected; netIdx++) {
+    const char* currentSSID = wifiNetworks[netIdx].ssid;
+    const char* currentPassword = wifiNetworks[netIdx].password;
+    
+    // 檢查此網路是否在掃描結果中
+    bool found_target = false;
+    for (int i = 0; i < n && !found_target; ++i) {
+      if (strcmp(WiFi.SSID(i), currentSSID) == 0) {
+        Serial.printf("✓ Network Found: '%s' (Signal: %d dBm)\n", currentSSID, WiFi.RSSI(i));
+        found_target = true;
+      }
+    }
+    
+    if (!found_target) {
+      Serial.printf("⏭️ Skipping Network: '%s' (Not Found)\n", currentSSID);
+      continue;
+    }
+    
+    // Attempt to connect to this network
+    Serial.printf("🔄 Connecting to '%s'...\n", currentSSID);
+    WiFi.begin(currentSSID, currentPassword);
+    
+    // 等待連接 (最多 10 秒)
+    int timeout = Config::WIFI_CONNECT_TIMEOUT_SECONDS;
+    while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+      delay(Config::MILLISECONDS_PER_SECOND);
+      Serial.print(".");
+      timeout--;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("\n🎉 Successfully Connected to '%s'!\n", currentSSID);
+      ssid = currentSSID;      // Update global variable
+      password = currentPassword;
+      connected = true;
+    } else {
+      Serial.printf("\n❌ Failed to Connect to '%s'\n", currentSSID);
+    }
+  }
+  
+  if (!connected) {
+    Serial.println("❌ 所有網路連接嘗試均失敗");
+    Serial.println("💡 請檢查上方列表中的正確網路名稱");
+    return false;
+  }
+  
+  // 顯示連接資訊
+  Serial.printf("IP 地址: %s\n", WiFi.localIP().toString().c_str());
+  Serial.printf("信號強度: %d dBm\n", WiFi.RSSI());
+  
+  // 啟動 TCP 串流伺服器
   tcpServer.begin();
+  Serial.printf("🌐 TCP Real-Time Streaming Server Started (Port: %d)\n", TCP_SERVER_PORT);
+  Serial.printf("連接後立即開始即時數據串流: telnet %s %d\n", WiFi.localIP().toString().c_str(), TCP_SERVER_PORT);
   Serial.printf("🔄 Streaming Format: JSON @ %luHz\n", Config::MILLISECONDS_PER_SECOND / STREAM_SEND_INTERVAL);
-
+  
+  // Initialize all streaming client slots
   for (int i = 0; i < MAX_STREAMING_CLIENTS; i++) {
     streamClients[i].isActive = false;
     streamClients[i].isStreaming = false;
     streamClients[i].bytesSent = 0;
   }
-
+  
   wifiConnected = true;
   return true;
+}
+
+// WiFi status string conversion (Enhanced diagnostic info)
+String getWiFiStatusString(int status) {
+  switch(status) {
+    case WL_IDLE_STATUS: 
+      return "Idle";
+    case WL_NO_SSID_AVAIL: 
+      return "SSID_Not_Found";
+    case WL_SCAN_COMPLETED: 
+      return "Scan_Complete";
+    case WL_CONNECTED: 
+      return "Connected";
+    case WL_CONNECT_FAILED: 
+      return "Connect_Failed";
+    case WL_CONNECTION_LOST: 
+      return "Connection_Lost";
+    case WL_DISCONNECTED: 
+      return "Disconnected";
+    default: 
+      return "Unknown";
+  }
 }
 
 // Display system information
@@ -656,9 +563,9 @@ void printSystemInfo() {
   Serial.printf("- Sensors: %ux QRE1113\n", Config::IR_SENSOR_COUNT);
   Serial.printf("- Display: SSD1306 %dx%d OLED\n", Config::OLED_WIDTH, Config::OLED_HEIGHT);
   if (wifiConnected) {
-    Serial.printf("- WiFi AP: %s (IP: %s)\n", Config::AP_SSID, apIpAddress.toString().c_str());
-    Serial.printf("- Real-Time Streaming: Port %d @ %luHz\n", TCP_SERVER_PORT, Config::MILLISECONDS_PER_SECOND / STREAM_SEND_INTERVAL);
-    Serial.printf("- Max Concurrent Clients: %d\n", MAX_STREAMING_CLIENTS);
+    Serial.printf("- WiFi: %s (IP: %s)\n", ssid, WiFi.localIP().toString().c_str());
+  Serial.printf("- Real-Time Streaming: Port %d @ %luHz\n", TCP_SERVER_PORT, Config::MILLISECONDS_PER_SECOND / STREAM_SEND_INTERVAL);
+  Serial.printf("- Max Concurrent Clients: %d\n", MAX_STREAMING_CLIENTS);
   } else {
     Serial.println("- WiFi: Offline Mode");
   }
@@ -670,7 +577,7 @@ void printSystemInfo() {
 // ========== WiFi 和 TCP 即時串流處理函數 ==========
 
 // 處理 WiFi 連接狀態和 TCP 即時串流（優化版 - 最小化 Core 0 負載）
-void handleWiFiAndRealTimeStreaming(QRE_AllSensors &sensors, ToFReadings &tofReadings) {
+void handleWiFiAndRealTimeStreaming(QRE_AllSensors &sensors) {
   static unsigned long lastProcessTime = 0;
   unsigned long currentTime = millis();
   
@@ -693,7 +600,7 @@ void handleWiFiAndRealTimeStreaming(QRE_AllSensors &sensors, ToFReadings &tofRea
     
     // 定期發送即時數據串流
     if (currentTime - lastStreamSend >= STREAM_SEND_INTERVAL) {
-      sendRealTimeStreamToAllClients(sensors, tofReadings);
+      sendRealTimeStreamToAllClients(sensors);
       lastStreamSend = currentTime;
     }
   }
@@ -701,22 +608,76 @@ void handleWiFiAndRealTimeStreaming(QRE_AllSensors &sensors, ToFReadings &tofRea
 
 // 檢查 WiFi 連接狀態（增強版診斷功能）
 void checkWiFiConnection() {
-  static uint8_t lastStationCount = 0;
-
-  if (!wifiConnected) {
-    Serial.println("⚠️ Access Point inactive. Attempting restart...");
-    if (initWiFiAndStreamingServer()) {
-      Serial.println("✅ Access Point restarted successfully");
-    } else {
-      Serial.println("❌ Access Point restart failed");
+  wl_status_t currentStatus = (wl_status_t)WiFi.status();
+  
+  // WiFi disconnection handling
+  if (currentStatus != WL_CONNECTED && wifiConnected) {
+    wifiConnected = false;
+    Serial.printf("⚠️ WiFi Connection Interrupted! Status: %s\n", getWiFiStatusString(currentStatus).c_str());
+    Serial.printf("📡 Signal Strength: %d dBm\n", WiFi.RSSI());
+    
+    // Disconnect all streaming clients
+    for (int i = 0; i < MAX_STREAMING_CLIENTS; i++) {
+      if (streamClients[i].isActive) {
+        streamClients[i].client.stop();
+        streamClients[i].isActive = false;
+        streamClients[i].isStreaming = false;
+      }
     }
-    return;
+    
+    // Attempt to reconnect to all available networks
+    Serial.println("🔄 Starting Reconnection Procedure...");
+    WiFi.disconnect();
+    delay(1000); // Wait for complete disconnection
+    
+    // 嘗試重新連接到任何可用的網路
+    bool reconnected = false;
+    for (int netIndex = 0; netIndex < numWiFiNetworks && !reconnected; netIndex++) {
+      const char* currentSSID = wifiNetworks[netIndex].ssid;
+      const char* currentPassword = wifiNetworks[netIndex].password;
+      
+      Serial.printf("🔄 嘗試重連到: %s\n", currentSSID);
+      WiFi.begin(currentSSID, currentPassword);
+      
+      // 等待連接結果（最多8秒）
+      unsigned long reconnectStart = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - reconnectStart < 8000) {
+        delay(300);
+        Serial.print(".");
+      }
+      Serial.println();
+      
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("✅ 重新連接成功！SSID: %s\n", currentSSID);
+        reconnected = true;
+        wifiConnected = true;
+        // 更新當前使用的網路資訊
+        ssid = currentSSID;
+        password = currentPassword;
+      }
+    }
+    
+    if (!reconnected) {
+      Serial.println("❌ All Network Reconnection Attempts Failed");
+      Serial.printf("📡 Current Status: %s\n", getWiFiStatusString((wl_status_t)WiFi.status()).c_str());
+    } else {
+      Serial.printf("✓ WiFi Reconnection Successful: %s\n", WiFi.localIP().toString().c_str());
+      Serial.printf("📶 Signal Strength: %d dBm\n", WiFi.RSSI());
+      
+      // Restart TCP streaming server
+      tcpServer.begin();
+      Serial.printf("🌐 TCP Real-Time Streaming Server Restarted: Port %d\n", TCP_SERVER_PORT);
+    }
   }
-
-  uint8_t currentStations = WiFi.softAPgetStationNum();
-  if (currentStations != lastStationCount) {
-    Serial.printf("� AP Clients: %d connected\n", currentStations);
-    lastStationCount = currentStations;
+  // WiFi reconnection success handling
+  else if (currentStatus == WL_CONNECTED && !wifiConnected) {
+    wifiConnected = true;
+    Serial.printf("✓ WiFi Auto-Reconnection Successful: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("📶 Signal Strength: %d dBm\n", WiFi.RSSI());
+    
+    // Restart TCP streaming server
+    tcpServer.begin();
+    Serial.printf("🌐 TCP Real-Time Streaming Server Restarted: Port %d\n", TCP_SERVER_PORT);
   }
 }
 
@@ -790,61 +751,25 @@ void handleStreamingClients(QRE_AllSensors &sensors) {
   }
 }
 
-String buildIrSensorStreamPayload(const QRE_AllSensors &sensors) {
-  String payload = "\"irsensors\":{";
-  payload += "\"raw\":[" + String(sensors.sensor[0].raw_value) + "," +
-             String(sensors.sensor[1].raw_value) + "," +
-             String(sensors.sensor[2].raw_value) + "," +
-             String(sensors.sensor[3].raw_value) + "],";
-  payload += "\"voltage\":[" + String(sensors.sensor[0].voltage, 3) + "," +
-             String(sensors.sensor[1].voltage, 3) + "," +
-             String(sensors.sensor[2].voltage, 3) + "," +
-             String(sensors.sensor[3].voltage, 3) + "]";
-  payload += "}";
-  return payload;
-}
-
-String buildTofSensorStreamPayload(const ToFReadings &tofReadings) {
-  String payload = "\"tof\":{";
-  payload += "\"distance_mm\":[" +
-             String(tofReadings.distance[Config::TOF_INDEX_RIGHT]) + "," +
-             String(tofReadings.distance[Config::TOF_INDEX_FRONT]) + "," +
-             String(tofReadings.distance[Config::TOF_INDEX_LEFT]) + "],";
-  payload += "\"valid\":[";
-  payload += (tofReadings.valid[Config::TOF_INDEX_RIGHT] ? "true" : "false");
-  payload += ",";
-  payload += (tofReadings.valid[Config::TOF_INDEX_FRONT] ? "true" : "false");
-  payload += ",";
-  payload += (tofReadings.valid[Config::TOF_INDEX_LEFT] ? "true" : "false");
-  payload += "],";
-  payload += "\"status\":[" +
-             String(tofReadings.status[Config::TOF_INDEX_RIGHT]) + "," +
-             String(tofReadings.status[Config::TOF_INDEX_FRONT]) + "," +
-             String(tofReadings.status[Config::TOF_INDEX_LEFT]) + "],";
-  payload += "\"direction\":\"" + tofReadings.getDirection() + "\"";
-  payload += "}";
-  return payload;
-}
-
 // 發送即時數據串流到所有連接的客戶端
-void sendRealTimeStreamToAllClients(QRE_AllSensors &sensors, ToFReadings &tofReadings) {
+void sendRealTimeStreamToAllClients(QRE_AllSensors &sensors) {
   // 計算系統性能指標
   float core0_freq = core0_loop_count * 1000.0 / millis();
   float core1_freq = core1_loop_count * 1000.0 / millis();
-
+  
   // 決定機器人行動狀態
   SumoAction currentAction = decideSumoAction(sensors);
   String actionString = getActionString(currentAction);
-
+  
   // 構建即時串流 JSON 數據包
   String streamData = "{";
   streamData += "\"timestamp\":" + String(millis()) + ",";
-
-  // 感測器數據 - QRE 紅外線陣列
-  streamData += buildIrSensorStreamPayload(sensors) + ",";
-
-  // 感測器數據 - ToF 距離陣列
-  streamData += buildTofSensorStreamPayload(tofReadings) + ",";
+  
+  // 感測器數據
+  streamData += "\"irsensors\":{";
+  streamData += "\"raw\":[" + String(sensors.sensor[0].raw_value) + "," + String(sensors.sensor[1].raw_value) + "," + String(sensors.sensor[2].raw_value) + "," + String(sensors.sensor[3].raw_value) + "],";
+  streamData += "\"voltage\":[" + String(sensors.sensor[0].voltage, 3) + "," + String(sensors.sensor[1].voltage, 3) + "," + String(sensors.sensor[2].voltage, 3) + "," + String(sensors.sensor[3].voltage, 3) + "]";
+  streamData += "},";
 
   // 機器人狀態
   streamData += "\"robot_state\":{";
@@ -853,24 +778,24 @@ void sendRealTimeStreamToAllClients(QRE_AllSensors &sensors, ToFReadings &tofRea
   streamData += "\"edge_direction\":\"" + sensors.getEdgeDirection() + "\",";
   streamData += "\"danger_level\":" + String(sensors.getDangerLevel());
   streamData += "},";
-
+  
   // 系統資訊
   streamData += "\"system_info\":{";
+  streamData += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
   streamData += "\"free_heap\":" + String(rp2040.getFreeHeap()) + ",";
   streamData += "\"core0_freq\":" + String(core0_freq, 1) + ",";
   streamData += "\"core1_freq\":" + String(core1_freq, 1) + ",";
-  streamData += "\"active_clients\":" + String(getActiveClientCount()) + ",";
-  streamData += "\"ap_clients\":" + String(WiFi.softAPgetStationNum());
+  streamData += "\"active_clients\":" + String(getActiveClientCount());
   streamData += "}";
-
+  
   streamData += "}\n";
-
+  
   // 發送到所有活躍的串流客戶端
   int sentCount = 0;
   for (int i = 0; i < MAX_STREAMING_CLIENTS; i++) {
     if (streamClients[i].isActive && streamClients[i].isStreaming) {
       WiFiClient &client = streamClients[i].client;
-
+      
       // 檢查客戶端寫入緩衝區是否可用
       if (client.availableForWrite() > streamData.length()) {
         client.print(streamData);
@@ -883,11 +808,11 @@ void sendRealTimeStreamToAllClients(QRE_AllSensors &sensors, ToFReadings &tofRea
       }
     }
   }
-
+  
   // 每30秒輸出一次串流統計
   static unsigned long lastStats = 0;
-  if (millis() - lastStats > Config::STREAM_STATS_INTERVAL_MS) {
-    Serial.printf("📊 串流統計: %d 活躍客戶端, 平均 %dHz, 封包大小 %d bytes\n",
+  if (millis() - lastStats > 30000) {
+    Serial.printf("📊 串流統計: %d 活躍客戶端, 平均 %dHz, 封包大小 %d bytes\n", 
                   sentCount, 1000/STREAM_SEND_INTERVAL, streamData.length());
     lastStats = millis();
   }
@@ -958,20 +883,23 @@ void showStartupScreen() {
 }
 
 // 更新 OLED 主顯示（包含串流狀態）
-void updateOLEDDisplay(QRE_AllSensors &sensors, ToFReadings &tofReadings) {
-  // Clear OLED buffer before drawing the next frame to avoid ghosting
+void updateOLEDDisplay(QRE_AllSensors &sensors) {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setTextWrap(false);
   
   // 標題行
+  display.setTextSize(0.5);  
   // WiFi 狀態行
   display.setCursor(0, 0);
   if (wifiConnected) {
-    display.print("AP: ");
-    display.print(apIpAddress.toString());
-    display.printf(" C:%d", WiFi.softAPgetStationNum());
+    display.print("WiFi: ");
+    display.print(WiFi.localIP().toString());
+    // WiFi 信號強度指示
+    int rssi = WiFi.RSSI();
+    if (rssi > -50) display.print(" ****");
+    else if (rssi > -60) display.print(" ***");
+    else if (rssi > -70) display.print(" **");
+    else display.print(" *");
   } else {
     display.print("WiFi: OFFLINE");
   }
@@ -997,52 +925,28 @@ void updateOLEDDisplay(QRE_AllSensors &sensors, ToFReadings &tofReadings) {
   else if (actionString == "ATTACK_FORWARD") display.print("ATTACK");
   else display.print("UNKNOWN");
   
-  // 感測器狀態 (以兩行呈現，保持可讀性)
-  static const char* SENSOR_LABELS[Config::IR_SENSOR_COUNT] = {"FL", "FR", "RL", "RR"};
-  const float edgeThreshold = Config::EDGE_THRESHOLD_VOLTS;
-  for (int row = 0; row < 2; ++row) {
-    display.setCursor(0, 32 + row * 8);
-    for (int col = 0; col < 2; ++col) {
-      int index = row * 2 + col;
-      display.print(SENSOR_LABELS[index]);
-      display.print(":");
-      display.print(sensors.sensor[index].voltage > edgeThreshold ? "E" : "S");
-      display.print("  ");
+  // 感測器狀態
+  display.setCursor(0, 35);
+  display.print("Sensors: ");
+  for (int i = 0; i < 4; i++) {
+    // Simple edge detection: voltage > 2.5V indicates edge detected
+    if (sensors.sensor[i].voltage > 2.5) {
+      display.print("E"); // E indicates edge detected
+    } else {
+      display.print("S"); // S indicates safe
     }
   }
   
   // 危險等級
-  display.setCursor(90, 32);
+  display.setCursor(85, 35);
   display.printf("D:%d/4", sensors.getDangerLevel());
   
-  // ToF 距離摘要 (取整數顯示，避免佔用空間)
-  display.setCursor(0, 48);
-  auto printToFValue = [&](uint8_t index) {
-    if (tofReadings.valid[index]) {
-      display.printf("%d", tofReadings.distance[index]);
-    } else {
-      display.print("--");
-    }
-  };
-  if (tofReadings.data_ready) {
-    display.print("ToF R:");
-    printToFValue(Config::TOF_INDEX_RIGHT);
-    display.print(" F:");
-    printToFValue(Config::TOF_INDEX_FRONT);
-    display.print(" L:");
-    printToFValue(Config::TOF_INDEX_LEFT);
-  } else if (!tofSystemOnline) {
-    display.print("ToF: OFFLINE");
-  } else {
-    display.print("ToF: -- -- --");
-  }
-  
   // 系統狀態行
-  display.setCursor(0, 56);
-  display.printf("Uptime:%lus", millis()/1000);
+  display.setCursor(0, 45);
+  display.printf("Uptime: %lus", millis()/1000);
   
   // Core 頻率狀態
-  display.setCursor(70, 56);
+  display.setCursor(0, 55);
   display.printf("C0:%.1fHz C1:%.1fHz", 
                  core0_loop_count * 1000.0 / millis(),
                  core1_loop_count * 1000.0 / millis());
@@ -1056,15 +960,12 @@ void updateOLEDDisplay(QRE_AllSensors &sensors, ToFReadings &tofReadings) {
 void updateSharedSensorData() {
   static int16_t raw_values[Config::IR_SENSOR_COUNT];
   static float voltages[Config::IR_SENSOR_COUNT];
-  static unsigned long lastToFRead = 0;
   
   // 讀取所有感測器
   for (int i = 0; i < Config::IR_SENSOR_COUNT; i++) {
     raw_values[i] = ads.readADC_SingleEnded(i);
     voltages[i] = ads.computeVolts(raw_values[i]);
   }
-
-  unsigned long irTimestamp = millis();
   
   // 更新共享數據 (使用互斥鎖確保數據完整性)
   mutex_enter_blocking(&data_mutex);
@@ -1072,38 +973,9 @@ void updateSharedSensorData() {
     shared_data.raw_values[i] = raw_values[i];
     shared_data.voltages[i] = voltages[i];
   }
-  shared_data.timestamp = irTimestamp;
+  shared_data.timestamp = millis();
   shared_data.data_ready = true;
   mutex_exit(&data_mutex);
-
-  unsigned long now = millis();
-  if ((now - lastToFRead) >= LOOP_DELAY_MS || lastToFRead == 0) {
-    ToFReadings tofReading;
-    readToFSensors(tofReading);
-    lastToFRead = tofReading.timestamp;
-
-    if (tofReading.data_ready) {
-      mutex_enter_blocking(&data_mutex);
-      for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-        shared_data.tof_distance[i] = tofReading.distance[i];
-        shared_data.tof_valid[i] = tofReading.valid[i];
-        shared_data.tof_status[i] = tofReading.status[i];
-      }
-      shared_data.tof_timestamp = tofReading.timestamp;
-      shared_data.tof_data_ready = true;
-      mutex_exit(&data_mutex);
-    } else {
-      mutex_enter_blocking(&data_mutex);
-  shared_data.tof_data_ready = false;
-  shared_data.tof_timestamp = tofReading.timestamp;
-      for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-        shared_data.tof_distance[i] = 0;
-        shared_data.tof_valid[i] = false;
-        shared_data.tof_status[i] = tofSensorInitialized[i] ? 0 : 0xFF;
-      }
-      mutex_exit(&data_mutex);
-    }
-  }
 }
 
 // Core 0 專用：從共享數據獲取感測器資訊
@@ -1111,12 +983,6 @@ QRE_AllSensors getAllSensorsFromShared() {
   QRE_AllSensors all_sensors;
   all_sensors.updateFromSharedData();
   return all_sensors;
-}
-
-ToFReadings getToFReadingsFromShared() {
-  ToFReadings readings;
-  readings.updateFromSharedData();
-  return readings;
 }
 
 // ========== Bottle Sumo 戰術函數 ==========
@@ -1174,7 +1040,7 @@ void executeSumoAction(SumoAction action, QRE_AllSensors &sensors) {
 }
 
 // Real-Time Streaming 狀態顯示（簡化版，避免串口輸出過多）
-void printStreamingStatus(QRE_AllSensors &sensors, ToFReadings &tofReadings) {
+void printStreamingStatus(QRE_AllSensors &sensors) {
   static unsigned long lastPrint = 0;
   
   // 每5秒輸出一次狀態（避免串口被淹沒）
@@ -1196,33 +1062,12 @@ void printStreamingStatus(QRE_AllSensors &sensors, ToFReadings &tofReadings) {
   Serial.printf("Robot Action: %s\n", getActionString(action).c_str());
   Serial.printf("Edge Detection: %s\n", sensors.isEdgeDetected() ? "⚠️ Detected!" : "✅ Safe");
   Serial.printf("Danger Level: %d/4\n", sensors.getDangerLevel());
-
-  if (!tofSystemOnline) {
-    Serial.println("ToF System: OFFLINE (no sensors detected)");
-  } else if (tofReadings.data_ready) {
-    String rightStr = tofReadings.valid[Config::TOF_INDEX_RIGHT]
-                        ? String(tofReadings.distance[Config::TOF_INDEX_RIGHT])
-                        : String("--");
-    String frontStr = tofReadings.valid[Config::TOF_INDEX_FRONT]
-                        ? String(tofReadings.distance[Config::TOF_INDEX_FRONT])
-                        : String("--");
-    String leftStr = tofReadings.valid[Config::TOF_INDEX_LEFT]
-                        ? String(tofReadings.distance[Config::TOF_INDEX_LEFT])
-                        : String("--");
-    Serial.printf("ToF Distances (mm): R=%s F=%s L=%s | Direction: %s | Fresh: %s\n",
-                  rightStr.c_str(),
-                  frontStr.c_str(),
-                  leftStr.c_str(),
-                  tofReadings.getDirection().c_str(),
-                  tofReadings.isDataFresh() ? "✅" : "⚠️");
-  } else {
-    Serial.println("ToF Data: Awaiting first measurement");
-  }
   
   // 串流狀態
   if (wifiConnected) {
     int activeClients = getActiveClientCount();
-    Serial.printf("Streaming: %d clients @ %dHz | AP Clients: %d\n", activeClients, 1000/STREAM_SEND_INTERVAL, WiFi.softAPgetStationNum());
+    Serial.printf("Streaming: %d clients @ %dHz\n", activeClients, 1000/STREAM_SEND_INTERVAL);
+    Serial.printf("WiFi Signal: %d dBm\n", WiFi.RSSI());
   } else {
     Serial.println("Streaming: OFFLINE");
   }
@@ -1235,49 +1080,23 @@ void printStreamingStatus(QRE_AllSensors &sensors, ToFReadings &tofReadings) {
 // Core 0 主循環 - 馬達控制與即時串流
 void loop() {
   static int loop_count = 0;
-  static bool irDataPrimed = false;
-  static bool tofDataPrimed = false;
-  static unsigned long lastIrStaleWarningMs = 0;
-  static unsigned long lastTofStaleWarningMs = 0;
   
   // 更新循環計數器
   core0_loop_count++;
   
   // 從 Core 1 獲取最新感測器數據
   QRE_AllSensors all_sensors = getAllSensorsFromShared();
-  ToFReadings tofReadings = getToFReadingsFromShared();
   
   // 檢查數據新鮮度
-  bool irFresh = all_sensors.isDataFresh(Config::DATA_FRESHNESS_TOLERANCE_MS);
-  if (irFresh) {
-    irDataPrimed = true;
-  } else if (!irDataPrimed) {
-    delay(Config::STALE_DATA_DELAY_MS);
+  if (!all_sensors.isDataFresh(20)) {  // 20ms 容忍度
+    Serial.println("⚠️ 警告: 感測器數據過時!");
+    delay(5);
     return;
-  } else {
-    unsigned long now = millis();
-    if (now - lastIrStaleWarningMs >= Config::STALE_WARNING_THROTTLE_MS) {
-      Serial.println(F("⚠️ 警告: 感測器數據過時!"));
-      lastIrStaleWarningMs = now;
-    }
-    delay(Config::STALE_DATA_DELAY_MS);
-    return;
-  }
-
-  bool tofFresh = tofReadings.isDataFresh();
-  if (tofFresh) {
-    tofDataPrimed = true;
-  } else if (tofReadings.data_ready) {
-    unsigned long now = millis();
-    if (tofDataPrimed && (now - lastTofStaleWarningMs) >= Config::STALE_WARNING_THROTTLE_MS) {
-      Serial.println(F("⚠️ 警告: ToF 感測器數據過時!"));
-      lastTofStaleWarningMs = now;
-    }
   }
   
   // 每 100 次循環顯示狀態（降低頻率避免串口堵塞）
   if (loop_count % 100 == 0) {
-    printStreamingStatus(all_sensors, tofReadings);
+    printStreamingStatus(all_sensors);
     
     // 決定並執行動作
     SumoAction action = decideSumoAction(all_sensors);
@@ -1286,13 +1105,13 @@ void loop() {
   
   // 每 25 次循環更新 OLED 顯示（適合即時監控）
   if (loop_count % 25 == 0) {
-    updateOLEDDisplay(all_sensors, tofReadings);
+    updateOLEDDisplay(all_sensors);
   }
   
   loop_count++;
   
   // WiFi 狀態監控和 TCP 即時串流處理
-  handleWiFiAndRealTimeStreaming(all_sensors, tofReadings);
+  handleWiFiAndRealTimeStreaming(all_sensors);
   
   // 馬達控制邏輯在這裡執行
   // TODO: 添加您的馬達控制代碼
