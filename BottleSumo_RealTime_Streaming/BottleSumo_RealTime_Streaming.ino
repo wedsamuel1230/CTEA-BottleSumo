@@ -90,18 +90,19 @@
 #include <Adafruit_VL53L0X.h>
 #include <WiFi.h>
 
-#define TIMING_BUDGET_US 20000          // 20ms per reading for ultra-fast mode
+#define TIMING_BUDGET_US 100000         // 100ms per reading for fast mode with 1.5m range
 #define VCSEL_PRE_RANGE 18              // Pre-range pulse period (speed optimized)
 #define VCSEL_FINAL_RANGE 14            // Final-range pulse period (speed optimized)
 #define DETECTION_THRESHOLD_MM 1600     // 160cm - sumo ring detection distance
 #define MAX_VALID_RANGE_MM 2000         // Maximum sensor range
 #define MIN_VALID_RANGE_MM 30           // Minimum sensor range (avoid false positives)
-#define LOOP_DELAY_MS 30                // 30ms = ~33Hz update rate
+#define LOOP_DELAY_MS 100               // 100ms = ~10Hz update rate for ToF
 #define MAX_INIT_RETRIES 3              // Maximum sensor initialization attempts
+#define TOF_STARTUP_DELAY_MS 500        // 500ms warmup per sensor (reliable startup)
 
-constexpr uint8_t TOF_RIGHT_ADDRESS = 0x32;
-constexpr uint8_t TOF_FRONT_ADDRESS = 0x34;
-constexpr uint8_t TOF_LEFT_ADDRESS = 0x36;
+constexpr uint8_t TOF_RIGHT_ADDRESS = 0x30;
+constexpr uint8_t TOF_FRONT_ADDRESS = 0x31;
+constexpr uint8_t TOF_LEFT_ADDRESS = 0x32;
 constexpr uint8_t TOF_XSHUT_RIGHT_PIN = 11;
 constexpr uint8_t TOF_XSHUT_FRONT_PIN = 12;
 constexpr uint8_t TOF_XSHUT_LEFT_PIN = 13;
@@ -109,6 +110,7 @@ constexpr unsigned long TOF_POST_RESET_DELAY_MS = 20;
 constexpr unsigned long TOF_RESET_DELAY_MS = 20;
 constexpr uint8_t TOF_MAX_VALID_STATUS = 2;
 constexpr unsigned long TOF_DATA_FRESHNESS_MS = 100;
+
 namespace Config {
   // Hardware configuration
   constexpr int OLED_WIDTH = 128;
@@ -175,6 +177,15 @@ Adafruit_SSD1306 display(Config::OLED_WIDTH, Config::OLED_HEIGHT, &Wire1, Config
 
 // OLED 更新控制
 unsigned long lastOLEDUpdate = 0;
+// ========== Bottle Sumo 控制邏輯 ==========
+
+// Sumo 機器人動作枚舉
+enum SumoAction {
+  SEARCH_OPPONENT,    // 搜尋對手
+  ATTACK_FORWARD,     // 直線攻擊
+  RETREAT_AND_TURN,   // 後退並轉向
+  EMERGENCY_REVERSE   // 緊急後退
+};
 
 // ========== WiFi TCP 即時串流伺服器配置 ==========
 
@@ -384,31 +395,159 @@ struct ToFReadings {
 // ========== 全域變數 ==========
 
 Adafruit_ADS1115 ads;  // ADS1115 ADC 物件
-Adafruit_VL53L0X tofSensors[Config::TOF_SENSOR_COUNT];  // ToF 感測器陣列
+Adafruit_VL53L0X lox1, lox2, lox3;  // ToF sensors: lox1=RIGHT, lox2=FRONT, lox3=LEFT
 bool tofSensorInitialized[Config::TOF_SENSOR_COUNT] = {false};
 volatile bool tofSystemOnline = false;
 
-const uint8_t TOF_XSHUT_PINS[Config::TOF_SENSOR_COUNT] = {
-  TOF_XSHUT_RIGHT_PIN,
-  TOF_XSHUT_FRONT_PIN,
-  TOF_XSHUT_LEFT_PIN
-};
+static void configureToFI2CBus() {
+  Wire1.setSDA(Config::OLED_SDA_PIN);
+  Wire1.setSCL(Config::OLED_SCL_PIN);
+  Wire1.begin();
+  Wire1.setClock(Config::I2C_FAST_MODE_HZ);
+}
 
-const uint8_t TOF_I2C_ADDRESSES[Config::TOF_SENSOR_COUNT] = {
-  TOF_RIGHT_ADDRESS,
-  TOF_FRONT_ADDRESS,
-  TOF_LEFT_ADDRESS
-};
+static void resetAllToFSensorsToLow() {
+  pinMode(TOF_XSHUT_RIGHT_PIN, OUTPUT);
+  pinMode(TOF_XSHUT_FRONT_PIN, OUTPUT);
+  pinMode(TOF_XSHUT_LEFT_PIN, OUTPUT);
+  digitalWrite(TOF_XSHUT_RIGHT_PIN, LOW);
+  digitalWrite(TOF_XSHUT_FRONT_PIN, LOW);
+  digitalWrite(TOF_XSHUT_LEFT_PIN, LOW);
+  delay(100);  // Extended reset delay for stability
+  // Explicit reset flags (no loop)
+  tofSensorInitialized[Config::TOF_INDEX_RIGHT] = false;
+  tofSensorInitialized[Config::TOF_INDEX_FRONT] = false;
+  tofSensorInitialized[Config::TOF_INDEX_LEFT] = false;
+}
 
-// ========== Bottle Sumo 控制邏輯 ==========
+// I2C Scanner for debugging (scans Wire1 bus used by ToF sensors and OLED)
+static void scanI2C() {
+  Serial.println("========================================");
+  Serial.println("I2C Scanner - Wire1 Bus (ToF + OLED)");
+  Serial.println("========================================");
+  byte error, address;
+  int nDevices = 0;
+  
+  for (address = 1; address < 127; address++) {
+    Wire1.beginTransmission(address);
+    error = Wire1.endTransmission();
+    
+    if (error == 0) {
+      Serial.print("I2C device found at address 0x");
+      if (address < 16) Serial.print("0");
+      Serial.print(address, HEX);
+      
+      // Identify known devices
+      if (address == 0x29) Serial.print(" (VL53L0X default - active sensor!)");
+      else if (address == 0x30) Serial.print(" (ToF RIGHT)");
+      else if (address == 0x31) Serial.print(" (ToF FRONT)");
+      else if (address == 0x32) Serial.print(" (ToF LEFT)");
+      else if (address == 0x3C) Serial.print(" (OLED Display)");
+      
+      Serial.println();
+      nDevices++;
+    } else if (error == 4) {
+      Serial.print("Unknown error at address 0x");
+      if (address < 16) Serial.print("0");
+      Serial.println(address, HEX);
+    }
+  }
+  
+  if (nDevices == 0) {
+    Serial.println("⚠️ No I2C devices found!");
+    Serial.println("Check wiring and power supply.");
+  } else {
+    Serial.print("✓ Found ");
+    Serial.print(nDevices);
+    Serial.println(" device(s)");
+  }
+  Serial.println("========================================");
+}
 
-// Sumo 機器人動作枚舉
-enum SumoAction {
-  SEARCH_OPPONENT,    // 搜尋對手
-  ATTACK_FORWARD,     // 直線攻擊
-  RETREAT_AND_TURN,   // 後退並轉向
-  EMERGENCY_REVERSE   // 緊急後退
-};
+// Sequential initialization WITHOUT loops (explicit per-sensor init)
+// VL53L0X boots at 0x29 (default), must be initialized then reprogrammed
+static bool initToFSensorsSequential() {
+  const uint8_t VL53L0X_DEFAULT_ADDRESS = 0x29;
+  
+  // RIGHT sensor (index 0) - Initialize at default 0x29, then reprogram to 0x30
+  Serial.println("Initializing RIGHT ToF sensor...");
+  digitalWrite(TOF_XSHUT_RIGHT_PIN, HIGH);
+  delay(TOF_STARTUP_DELAY_MS);
+  
+  if (lox1.begin(VL53L0X_DEFAULT_ADDRESS, false, &Wire1)) {
+    lox1.setAddress(TOF_RIGHT_ADDRESS);  // Reprogram to 0x30
+    lox1.setMeasurementTimingBudgetMicroSeconds(TIMING_BUDGET_US);
+    tofSensorInitialized[Config::TOF_INDEX_RIGHT] = true;
+    Serial.printf("✓ RIGHT sensor OK @ 0x%02X (1.5m mode, %luus)\n", TOF_RIGHT_ADDRESS, static_cast<unsigned long>(TIMING_BUDGET_US));
+  } else {
+    tofSensorInitialized[Config::TOF_INDEX_RIGHT] = false;
+    Serial.println("✗ RIGHT sensor FAILED (couldn't init at 0x29)");
+  }
+  
+  // FRONT sensor (index 1) - Initialize at default 0x29, then reprogram to 0x31
+  Serial.println("Initializing FRONT ToF sensor...");
+  digitalWrite(TOF_XSHUT_FRONT_PIN, HIGH);
+  delay(TOF_STARTUP_DELAY_MS);
+  
+  if (lox2.begin(VL53L0X_DEFAULT_ADDRESS, false, &Wire1)) {
+    lox2.setAddress(TOF_FRONT_ADDRESS);  // Reprogram to 0x31
+    lox2.setMeasurementTimingBudgetMicroSeconds(TIMING_BUDGET_US);
+    lox2.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_PRE_RANGE, VCSEL_PRE_RANGE);
+    lox2.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_FINAL_RANGE, VCSEL_FINAL_RANGE);
+    tofSensorInitialized[Config::TOF_INDEX_FRONT] = true;
+    Serial.printf("✓ FRONT sensor OK @ 0x%02X (1.5m mode, %luus)\n", TOF_FRONT_ADDRESS, static_cast<unsigned long>(TIMING_BUDGET_US));
+  } else {
+    tofSensorInitialized[Config::TOF_INDEX_FRONT] = false;
+    Serial.println("✗ FRONT sensor FAILED (couldn't init at 0x29)");
+  }
+  
+  // LEFT sensor (index 2) - Initialize at default 0x29, then reprogram to 0x32
+  Serial.println("Initializing LEFT ToF sensor...");
+  digitalWrite(TOF_XSHUT_LEFT_PIN, HIGH);
+  delay(TOF_STARTUP_DELAY_MS);
+  
+  if (lox3.begin(VL53L0X_DEFAULT_ADDRESS, false, &Wire1)) {
+    lox3.setAddress(TOF_LEFT_ADDRESS);  // Reprogram to 0x32
+    lox3.setMeasurementTimingBudgetMicroSeconds(TIMING_BUDGET_US);
+    lox3.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_PRE_RANGE, VCSEL_PRE_RANGE);
+    lox3.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_FINAL_RANGE, VCSEL_FINAL_RANGE);
+    tofSensorInitialized[Config::TOF_INDEX_LEFT] = true;
+    Serial.printf("✓ LEFT sensor OK @ 0x%02X (1.5m mode, %luus)\n", TOF_LEFT_ADDRESS, static_cast<unsigned long>(TIMING_BUDGET_US));
+  } else {
+    tofSensorInitialized[Config::TOF_INDEX_LEFT] = false;
+    Serial.println("✗ LEFT sensor FAILED (couldn't init at 0x29)");
+  }
+  
+  // Count successful sensors (explicit, no loop)
+  int successCount = 0;
+  if (tofSensorInitialized[Config::TOF_INDEX_RIGHT]) successCount++;
+  if (tofSensorInitialized[Config::TOF_INDEX_FRONT]) successCount++;
+  if (tofSensorInitialized[Config::TOF_INDEX_LEFT]) successCount++;
+  
+  Serial.printf("ToF Init Result: %d/3 sensors online\n", successCount);
+  return (successCount == Config::TOF_SENSOR_COUNT);
+}
+
+static String describeOfflineToFSensors() {
+  String names;
+  // Explicit checks (no loop)
+  if (!tofSensorInitialized[Config::TOF_INDEX_RIGHT]) {
+    names += "RIGHT";
+  }
+  if (!tofSensorInitialized[Config::TOF_INDEX_FRONT]) {
+    if (names.length() > 0) names += ", ";
+    names += "FRONT";
+  }
+  if (!tofSensorInitialized[Config::TOF_INDEX_LEFT]) {
+    if (names.length() > 0) names += ", ";
+    names += "LEFT";
+  }
+  if (names.length() == 0) {
+    names = "none";
+  }
+  return names;
+}
+
 
 // ========== 初始化函數 ==========
 
@@ -444,18 +583,20 @@ void setup() {
     Serial.println("⚠️ OLED Display Initialization Failed");
   }
   
-  // Initialize WiFi and TCP streaming server
+  // Wait for Core 1 sensor initialization to complete FIRST
+  // This prevents I2C bus conflicts between WiFi and sensor initialization
+  Serial.println("Waiting for Core 1 (Sensor Core) Startup...");
+  while (!core1_active) {
+    delay(Config::CORE1_WAIT_POLL_DELAY_MS);
+  }
+  Serial.println("✓ Core 1 Sensor Initialization Complete");
+  
+  // NOW initialize WiFi after sensors are ready
   Serial.println("Initializing WiFi Real-Time Streaming Server...");
   if (initWiFiAndStreamingServer()) {
     Serial.println("✓ WiFi Real-Time Streaming Server Initialization Complete");
   } else {
     Serial.println("⚠️ WiFi Connection Failed, Continue in Offline Mode");
-  }
-  
-  // Wait for Core 1 startup
-  Serial.println("Waiting for Core 1 (Sensor Core) Startup...");
-  while (!core1_active) {
-    delay(Config::CORE1_WAIT_POLL_DELAY_MS);
   }
   
   Serial.println("✓ Dual-Core Real-Time Streaming System Initialization Complete");
@@ -503,86 +644,138 @@ bool initSensorSystem() {
 }
 
 bool initToFSensors() {
-  for (int attempt = 1; attempt <= MAX_INIT_RETRIES; ++attempt) {
-    Serial.printf("ToF Initialization attempt %d/%d\n", attempt, MAX_INIT_RETRIES);
-
-    // Ensure secondary I2C bus is configured (safe to call repeatedly)
-    Wire1.setSDA(Config::OLED_SDA_PIN);
-    Wire1.setSCL(Config::OLED_SCL_PIN);
-    Wire1.begin();
-    Wire1.setClock(Config::I2C_FAST_MODE_HZ);
-
-    // Reset all sensors
-    for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-      pinMode(TOF_XSHUT_PINS[i], OUTPUT);
-      digitalWrite(TOF_XSHUT_PINS[i], LOW);
-      tofSensorInitialized[i] = false;
-    }
-  delay(TOF_RESET_DELAY_MS);
-
-    int availableCount = 0;
-
-    for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-      digitalWrite(TOF_XSHUT_PINS[i], HIGH);
-      delay(TOF_POST_RESET_DELAY_MS);
-
-      if (!tofSensors[i].begin(TOF_I2C_ADDRESSES[i], false, &Wire1)) {
-        Serial.printf("Failed to init ToF sensor %d (address 0x%02X)\n", i, TOF_I2C_ADDRESSES[i]);
-        tofSensorInitialized[i] = false;
-        continue;
-      }
-
-      tofSensors[i].setMeasurementTimingBudgetMicroSeconds(TIMING_BUDGET_US);
-      tofSensors[i].setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_PRE_RANGE, VCSEL_PRE_RANGE);
-      tofSensors[i].setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_FINAL_RANGE, VCSEL_FINAL_RANGE);
-      tofSensorInitialized[i] = true;
-      availableCount++;
-    }
-
-    if (availableCount == Config::TOF_SENSOR_COUNT) {
-      Serial.println("ToF sensors initialized successfully (Ultra Fast mode)");
-      return true;
-    }
-
-    if (availableCount > 0) {
-      Serial.printf("⚠️ ToF degraded: %d/%d sensors online. Missing sensors will be reported as offline.\n",
-                    availableCount, Config::TOF_SENSOR_COUNT);
-      return true;
-    }
-
-    if (attempt < MAX_INIT_RETRIES) {
-      Serial.println("Retrying ToF sensor initialization...");
-      delay(TOF_RESET_DELAY_MS);
-    }
+  Serial.println("========================================");
+  Serial.println("ToF Sensor Initialization (Sequential)");
+  Serial.println("========================================");
+  
+  configureToFI2CBus();
+  
+  // Debug: Scan I2C bus before initialization
+  scanI2C();
+  
+  // ATTEMPT 1 (explicit, no loop)
+  Serial.println("[Attempt 1/3]");
+  resetAllToFSensorsToLow();
+  if (initToFSensorsSequential()) {
+    Serial.println("✓✓✓ All ToF sensors initialized successfully! ✓✓✓");
+    return true;
   }
+  
+  // Check for partial success
+  int count1 = 0;
+  if (tofSensorInitialized[Config::TOF_INDEX_RIGHT]) count1++;
+  if (tofSensorInitialized[Config::TOF_INDEX_FRONT]) count1++;
+  if (tofSensorInitialized[Config::TOF_INDEX_LEFT]) count1++;
+  
+  if (count1 > 0) {
+    String offline = describeOfflineToFSensors();
+    Serial.printf("⚠️ Degraded mode: %d/3 online. Offline: %s\n", count1, offline.c_str());
+    return true;  // Accept partial success
+  }
+  
+  scanI2C();
 
-  Serial.println("CRITICAL: Failed to initialize any ToF sensor after multiple retries");
+  // ATTEMPT 2 (explicit, no loop)
+  Serial.println("[Attempt 2/3] Retrying...");
+  delay(200);
+  resetAllToFSensorsToLow();
+  if (initToFSensorsSequential()) {
+    Serial.println("✓✓✓ All ToF sensors initialized successfully! ✓✓✓");
+    return true;
+  }
+  
+  // Check for partial success
+  int count2 = 0;
+  if (tofSensorInitialized[Config::TOF_INDEX_RIGHT]) count2++;
+  if (tofSensorInitialized[Config::TOF_INDEX_FRONT]) count2++;
+  if (tofSensorInitialized[Config::TOF_INDEX_LEFT]) count2++;
+  
+  if (count2 > 0) {
+    String offline = describeOfflineToFSensors();
+    Serial.printf("⚠️ Degraded mode: %d/3 online. Offline: %s\n", count2, offline.c_str());
+    return true;  // Accept partial success
+  }
+  
+  scanI2C();
+
+  // ATTEMPT 3 (explicit, no loop)
+  Serial.println("[Attempt 3/3] Final retry...");
+  delay(200);
+  resetAllToFSensorsToLow();
+  if (initToFSensorsSequential()) {
+    Serial.println("✓✓✓ All ToF sensors initialized successfully! ✓✓✓");
+    return true;
+  }
+  
+  // Final check for partial success
+  int count3 = 0;
+  if (tofSensorInitialized[Config::TOF_INDEX_RIGHT]) count3++;
+  if (tofSensorInitialized[Config::TOF_INDEX_FRONT]) count3++;
+  if (tofSensorInitialized[Config::TOF_INDEX_LEFT]) count3++;
+  
+  if (count3 > 0) {
+    String offline = describeOfflineToFSensors();
+    Serial.printf("⚠️ Degraded mode: %d/3 online. Offline: %s\n", count3, offline.c_str());
+    return true;  // Accept partial success
+  }
+  
+  Serial.println("========================================");
+  Serial.println("CRITICAL: All ToF sensors failed to initialize");
+  Serial.println("Check hardware connections and I2C bus");
+  Serial.println("========================================");
   return false;
 }
 
 void readToFSensors(ToFReadings &reading) {
+  VL53L0X_RangingMeasurementData_t data1, data2, data3;
   bool anySensorActive = false;
 
-  for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-    if (!tofSensorInitialized[i]) {
-      reading.status[i] = 0xFF;  // 0xFF indicates sensor offline
-      reading.valid[i] = false;
-      reading.distance[i] = 0;
-      continue;
-    }
-
+  // RIGHT sensor (lox1)
+  if (!tofSensorInitialized[Config::TOF_INDEX_RIGHT]) {
+    reading.status[Config::TOF_INDEX_RIGHT] = 0xFF;
+    reading.valid[Config::TOF_INDEX_RIGHT] = false;
+    reading.distance[Config::TOF_INDEX_RIGHT] = 0;
+  } else {
     anySensorActive = true;
+    lox1.rangingTest(&data1, false);
+    reading.status[Config::TOF_INDEX_RIGHT] = data1.RangeStatus;
+    bool valid = (data1.RangeStatus <= TOF_MAX_VALID_STATUS) &&
+                 (data1.RangeMilliMeter >= MIN_VALID_RANGE_MM) &&
+                 (data1.RangeMilliMeter < MAX_VALID_RANGE_MM);
+    reading.valid[Config::TOF_INDEX_RIGHT] = valid;
+    reading.distance[Config::TOF_INDEX_RIGHT] = valid ? data1.RangeMilliMeter : 0;
+  }
 
-    VL53L0X_RangingMeasurementData_t data;
-    tofSensors[i].rangingTest(&data, false);
+  // FRONT sensor (lox2)
+  if (!tofSensorInitialized[Config::TOF_INDEX_FRONT]) {
+    reading.status[Config::TOF_INDEX_FRONT] = 0xFF;
+    reading.valid[Config::TOF_INDEX_FRONT] = false;
+    reading.distance[Config::TOF_INDEX_FRONT] = 0;
+  } else {
+    anySensorActive = true;
+    lox2.rangingTest(&data2, false);
+    reading.status[Config::TOF_INDEX_FRONT] = data2.RangeStatus;
+    bool valid = (data2.RangeStatus <= TOF_MAX_VALID_STATUS) &&
+                 (data2.RangeMilliMeter >= MIN_VALID_RANGE_MM) &&
+                 (data2.RangeMilliMeter < MAX_VALID_RANGE_MM);
+    reading.valid[Config::TOF_INDEX_FRONT] = valid;
+    reading.distance[Config::TOF_INDEX_FRONT] = valid ? data2.RangeMilliMeter : 0;
+  }
 
-    reading.status[i] = data.RangeStatus;
-  bool valid = (data.RangeStatus <= TOF_MAX_VALID_STATUS) &&
-         (data.RangeMilliMeter >= MIN_VALID_RANGE_MM) &&
-         (data.RangeMilliMeter < MAX_VALID_RANGE_MM);
-
-    reading.valid[i] = valid;
-    reading.distance[i] = valid ? data.RangeMilliMeter : 0;
+  // LEFT sensor (lox3)
+  if (!tofSensorInitialized[Config::TOF_INDEX_LEFT]) {
+    reading.status[Config::TOF_INDEX_LEFT] = 0xFF;
+    reading.valid[Config::TOF_INDEX_LEFT] = false;
+    reading.distance[Config::TOF_INDEX_LEFT] = 0;
+  } else {
+    anySensorActive = true;
+    lox3.rangingTest(&data3, false);
+    reading.status[Config::TOF_INDEX_LEFT] = data3.RangeStatus;
+    bool valid = (data3.RangeStatus <= TOF_MAX_VALID_STATUS) &&
+                 (data3.RangeMilliMeter >= MIN_VALID_RANGE_MM) &&
+                 (data3.RangeMilliMeter < MAX_VALID_RANGE_MM);
+    reading.valid[Config::TOF_INDEX_LEFT] = valid;
+    reading.distance[Config::TOF_INDEX_LEFT] = valid ? data3.RangeMilliMeter : 0;
   }
 
   reading.timestamp = millis();
@@ -1052,13 +1245,12 @@ void updateOLEDDisplay(QRE_AllSensors &sensors, ToFReadings &tofReadings) {
 
 // ========== 感測器讀取函數 ==========
 
-// Core 1 專用：更新共享數據
-void updateSharedSensorData() {
+// Core 1 專用：更新共享 IR 感測器數據 (高速)
+void updateSharedIRData() {
   static int16_t raw_values[Config::IR_SENSOR_COUNT];
   static float voltages[Config::IR_SENSOR_COUNT];
-  static unsigned long lastToFRead = 0;
   
-  // 讀取所有感測器
+  // 讀取所有 IR 感測器 (快速，約 860 SPS)
   for (int i = 0; i < Config::IR_SENSOR_COUNT; i++) {
     raw_values[i] = ads.readADC_SingleEnded(i);
     voltages[i] = ads.computeVolts(raw_values[i]);
@@ -1075,34 +1267,37 @@ void updateSharedSensorData() {
   shared_data.timestamp = irTimestamp;
   shared_data.data_ready = true;
   mutex_exit(&data_mutex);
+}
 
-  unsigned long now = millis();
-  if ((now - lastToFRead) >= LOOP_DELAY_MS || lastToFRead == 0) {
-    ToFReadings tofReading;
-    readToFSensors(tofReading);
-    lastToFRead = tofReading.timestamp;
+// Core 1 專用：更新共享 ToF 感測器數據 (慢速，獨立更新)
+void updateSharedToFData() {
+  if (!tofSystemOnline) {
+    return;
+  }
 
-    if (tofReading.data_ready) {
-      mutex_enter_blocking(&data_mutex);
-      for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-        shared_data.tof_distance[i] = tofReading.distance[i];
-        shared_data.tof_valid[i] = tofReading.valid[i];
-        shared_data.tof_status[i] = tofReading.status[i];
-      }
-      shared_data.tof_timestamp = tofReading.timestamp;
-      shared_data.tof_data_ready = true;
-      mutex_exit(&data_mutex);
-    } else {
-      mutex_enter_blocking(&data_mutex);
-  shared_data.tof_data_ready = false;
-  shared_data.tof_timestamp = tofReading.timestamp;
-      for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
-        shared_data.tof_distance[i] = 0;
-        shared_data.tof_valid[i] = false;
-        shared_data.tof_status[i] = tofSensorInitialized[i] ? 0 : 0xFF;
-      }
-      mutex_exit(&data_mutex);
+  ToFReadings tofReading;
+  readToFSensors(tofReading);
+
+  if (tofReading.data_ready) {
+    mutex_enter_blocking(&data_mutex);
+    for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
+      shared_data.tof_distance[i] = tofReading.distance[i];
+      shared_data.tof_valid[i] = tofReading.valid[i];
+      shared_data.tof_status[i] = tofReading.status[i];
     }
+    shared_data.tof_timestamp = tofReading.timestamp;
+    shared_data.tof_data_ready = true;
+    mutex_exit(&data_mutex);
+  } else {
+    mutex_enter_blocking(&data_mutex);
+    shared_data.tof_data_ready = false;
+    shared_data.tof_timestamp = tofReading.timestamp;
+    for (int i = 0; i < Config::TOF_SENSOR_COUNT; ++i) {
+      shared_data.tof_distance[i] = 0;
+      shared_data.tof_valid[i] = false;
+      shared_data.tof_status[i] = tofSensorInitialized[i] ? 0 : 0xFF;
+    }
+    mutex_exit(&data_mutex);
   }
 }
 
@@ -1303,13 +1498,23 @@ void loop() {
 
 // Core 1 主循環 - 專門負責感測器讀取
 void loop1() {
+  static unsigned long lastToFUpdate = 0;
+  
   // 更新循環計數器
   core1_loop_count++;
   
-  // 持續高速讀取感測器並更新共享數據
-  updateSharedSensorData();
+  // 持續高速讀取 IR 感測器並更新共享數據
+  // IR sensors are fast (~860 SPS), so we read them continuously
+  updateSharedIRData();
   
-  // 最小延遲，讓 Core 1 以最高速度運行
+  // ToF sensors are slower (100ms timing budget), update at ~10Hz
+  unsigned long now = millis();
+  if ((now - lastToFUpdate) >= LOOP_DELAY_MS) {
+    updateSharedToFData();
+    lastToFUpdate = now;
+  }
+  
+  // 最小延遲，讓 Core 1 以最高速度運行 IR 讀取
   // 實際速度由 ADS1115 的讀取速度決定 (~860 SPS)
 }
 
