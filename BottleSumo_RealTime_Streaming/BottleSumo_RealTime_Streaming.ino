@@ -91,8 +91,8 @@
 #include <WiFi.h>
 
 // ToF Sensor Hardware Configuration
-constexpr uint8_t TOF_XSHUT_1 = 11;                   // GP11 - Right sensor shutdown pin
-constexpr uint8_t TOF_XSHUT_2 = 12;                   // GP12 - Front sensor shutdown pin
+constexpr uint8_t TOF_XSHUT_1 = 12;                   // GP11 - Right sensor shutdown pin
+constexpr uint8_t TOF_XSHUT_2 = 11;                   // GP12 - Front sensor shutdown pin
 constexpr uint8_t TOF_XSHUT_3 = 13;                   // GP13 - Left sensor shutdown pin
 constexpr uint8_t TOF_RIGHT_ADDRESS = 0x30;           // Right sensor I2C address
 constexpr uint8_t TOF_FRONT_ADDRESS = 0x31;           // Front sensor I2C address
