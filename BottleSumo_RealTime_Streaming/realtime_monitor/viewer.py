@@ -154,7 +154,7 @@ class BottleSumoViewer(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Bottle Sumo Real-Time Viewer")
-        self.geometry("650x750")  # Increased height for threshold config UI
+        self.geometry("650x850")  # Increased height for threshold config UI
         self.minsize(600, 750)
 
         self._reader_thread: Optional[TelemetryReader] = None
@@ -164,8 +164,8 @@ class BottleSumoViewer(tk.Tk):
         self._drag_start_x = 0
         self._drag_start_y = 0
         
-        # Configurable threshold (user can adjust via UI)
-        self.ir_threshold_config = tk.DoubleVar(value=2.5)  # Default 2.5V
+        # Configurable thresholds (one per sensor, user can adjust via UI)
+        self.ir_threshold_configs = [tk.DoubleVar(value=2.5) for _ in range(4)]  # Default 2.5V for each sensor
         
         # Store last telemetry packet for redrawing when threshold changes
         self._last_packet: Optional[TelemetryPacket] = None
@@ -175,6 +175,9 @@ class BottleSumoViewer(tk.Tk):
         
         # Configure custom progress bar styles for color coding
         self._setup_progress_bar_styles()
+        
+        # Define unique colors for each IR sensor's threshold bar
+        self.sensor_colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4']  # Red, Teal, Blue, Green
 
         self._build_ui()
         self._setup_window_drag()
@@ -268,17 +271,21 @@ class BottleSumoViewer(tk.Tk):
         threshold_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         threshold_frame.columnconfigure(1, weight=1)
         
-        # IR Edge Threshold (user configurable)
-        ttk.Label(threshold_frame, text="IR Edge Threshold (V):").grid(row=0, column=0, sticky="w", padx=5)
-        threshold_spinbox = ttk.Spinbox(threshold_frame, from_=0.0, to=4.096, increment=0.1, 
-                                        textvariable=self.ir_threshold_config, width=8)
-        threshold_spinbox.grid(row=0, column=1, sticky="w", padx=5)
-        ttk.Button(threshold_frame, text="Apply", command=self._apply_threshold_changes).grid(row=0, column=2, padx=5)
+        # IR Edge Thresholds (one per sensor, user configurable)
+        self.threshold_spinboxes = []
+        for idx in range(4):
+            ttk.Label(threshold_frame, text=f"IR Sensor {idx} Threshold (V):").grid(row=idx, column=0, sticky="w", padx=5)
+            spinbox = ttk.Spinbox(threshold_frame, from_=0.0, to=4.096, increment=0.1, 
+                                  textvariable=self.ir_threshold_configs[idx], width=8)
+            spinbox.grid(row=idx, column=1, sticky="w", padx=5)
+            self.threshold_spinboxes.append(spinbox)
+        
+        ttk.Button(threshold_frame, text="Apply All", command=self._apply_threshold_changes).grid(row=4, column=0, columnspan=2, pady=(10, 0))
         
         # Display firmware's threshold values (read-only)
-        ttk.Label(threshold_frame, text="Firmware IR Threshold:").grid(row=1, column=0, sticky="w", padx=5)
+        ttk.Label(threshold_frame, text="Firmware IR Thresholds:").grid(row=5, column=0, sticky="w", padx=5)
         self.firmware_ir_threshold_var = tk.StringVar(value="-")
-        ttk.Label(threshold_frame, textvariable=self.firmware_ir_threshold_var).grid(row=1, column=1, sticky="w", padx=5)
+        ttk.Label(threshold_frame, textvariable=self.firmware_ir_threshold_var).grid(row=5, column=1, sticky="w", padx=5)
         
         # ToF Sensors data ---------------------------------------------------
         tof_frame = ttk.LabelFrame(root, text="ToF Sensors (VL53L0X)", padding=8)
@@ -372,28 +379,28 @@ class BottleSumoViewer(tk.Tk):
         self._update_threshold_markers()
 
     def _apply_threshold_changes(self) -> None:
-        """Apply threshold changes: update GUI markers and send command to firmware.
+        """Apply threshold changes: update GUI markers and send commands to firmware.
         
-        Sends a TCP command to the Arduino firmware to update the runtime threshold value.
-        The firmware will acknowledge the command and immediately start using the new threshold.
+        Sends TCP commands to the Arduino firmware to update the runtime threshold values.
+        The firmware will acknowledge the commands and immediately start using the new thresholds.
         """
         # Update GUI threshold markers
         self._update_threshold_markers()
         
-        # Check if connected before sending command
+        # Check if connected before sending commands
         if not self._reader_thread or not self._reader_thread.is_alive():
-            self.status_var.set("⚠️ Not connected. Connect first to apply threshold.")
+            self.status_var.set("⚠️ Not connected. Connect first to apply thresholds.")
             return
         
-        # Send threshold command to firmware
-        threshold_value = self.ir_threshold_config.get()
-        self._send_threshold_command(threshold_value)
+        # Send threshold commands for each sensor
+        thresholds = [round(config.get(), 2) for config in self.ir_threshold_configs]
+        self._send_threshold_commands(thresholds)
     
-    def _send_threshold_command(self, value: float) -> None:
-        """Send threshold configuration command to Arduino firmware via TCP.
+    def _send_threshold_commands(self, thresholds: list[float]) -> None:
+        """Send threshold configuration commands to Arduino firmware via TCP.
         
         Args:
-            value: Threshold voltage value (0.1 - 4.0V)
+            thresholds: List of threshold voltage values (0.1 - 4.0V) for each sensor
         """
         try:
             # Get socket from reader thread
@@ -403,29 +410,22 @@ class BottleSumoViewer(tk.Tk):
             
             sock = self._reader_thread._sock
             
-            # Build JSON command: {"cmd":"set_threshold","value":2.5}
-            import json
-            command = {"cmd":"set_threshold","value":round(value, 2)}
-            command_str = json.dumps(command) + "\n"
-            # Update displayed firmware threshold immediately for UI feedback
-            # (previous code accidentally assigned to a local variable)
-            try:
-                self.firmware_ir_threshold_var.set(f"{float(value):.2f}V")
-            except Exception:
-                # Fallback: set raw value if conversion fails
-                self.firmware_ir_threshold_var.set(str(value))
-            # Send command (non-blocking)
-            sock.sendall(command_str.encode('utf-8'))
+            # Send command for each sensor
+            for idx, value in enumerate(thresholds):
+                # Build JSON command: {"cmd":"set_threshold","sensor":0,"value":2.5}
+                command = {"cmd":"set_threshold","sensor":idx,"value":value}
+                command_str = json.dumps(command) + "\n"
+                sock.sendall(command_str.encode('utf-8'))
+                print(f"[TCP] Sent command for sensor {idx}: {command_str.strip()}")
             
-            self.status_var.set(f"📤 Sent threshold command: {value:.2f}V (awaiting ack...)")
-            print(f"[TCP] Sent command: {command_str.strip()}")
+            self.status_var.set(f"📤 Sent threshold commands for {len(thresholds)} sensors (awaiting acks...)")
             
         except Exception as e:
-            self.status_var.set(f"❌ Failed to send command: {e}")
-            print(f"[TCP] Error sending command: {e}")
+            self.status_var.set(f"❌ Failed to send commands: {e}")
+            print(f"[TCP] Error sending commands: {e}")
 
     def _draw_voltage_bar(self, sensor_idx: int, voltage: float, fill_color: str) -> None:
-        """Draw voltage bar on Canvas with threshold line overlay.
+        """Draw voltage bar on Canvas with sensor-specific threshold line overlay.
         
         Args:
             sensor_idx: Index of sensor (0-3)
@@ -445,42 +445,41 @@ class BottleSumoViewer(tk.Tk):
         if fill_width > 0:
             canvas.create_rectangle(0, 0, fill_width, canvas_height, fill=fill_color, outline='')
         
-        # Draw threshold line on top
-        threshold_voltage = self.ir_threshold_config.get()
+        # Draw sensor-specific threshold line on top
+        threshold_voltage = self.ir_threshold_configs[sensor_idx].get()
         line_x = (threshold_voltage / 4.096) * canvas_width
+        
+        # Use sensor-specific color for threshold line
+        threshold_color = self.sensor_colors[sensor_idx]
         
         # White outline for visibility
         canvas.create_line(line_x, 0, line_x, canvas_height, fill='#FFFFFF', width=4, tags='threshold_outline')
-        # Red line on top
-        canvas.create_line(line_x, 0, line_x, canvas_height, fill='#FF0000', width=2, tags='threshold')
+        # Sensor-specific color line on top
+        canvas.create_line(line_x, 0, line_x, canvas_height, fill=threshold_color, width=2, tags='threshold')
 
     def _update_threshold_markers(self) -> None:
-        """Update red threshold line position on IR sensor Canvas displays.
+        """Update threshold line positions on IR sensor Canvas displays.
         
         Note: Since Canvas now draws both voltage bar AND threshold line,
-        we need to redraw everything when threshold changes.
+        we need to redraw everything when any threshold changes.
         """
         # Trigger a full redraw of all voltage bars with current values
-        # This will redraw both the bar and the new threshold position
+        # This will redraw both the bar and the new threshold positions
         if hasattr(self, '_last_packet') and self._last_packet:
-            # Re-process last packet to redraw bars with new threshold
+            # Re-process last packet to redraw bars with new thresholds
             for idx in range(4):
                 volt_value = self._last_packet.sensors_voltage[idx] if idx < len(self._last_packet.sensors_voltage) else None
                 if isinstance(volt_value, (float, int)):
                     bar_value = max(0.0, min(4.096, float(volt_value)))
-                    if volt_value < 1.5:
-                        fill_color = '#4CAF50'  # Green
-                    elif volt_value < 2.5:
-                        fill_color = '#FFC107'  # Yellow
-                    else:
-                        fill_color = '#F44336'  # Red
+                    # Use sensor-specific color
+                    fill_color = self.sensor_colors[idx]
                     self._draw_voltage_bar(idx, bar_value, fill_color)
                 else:
-                    self._draw_voltage_bar(idx, 0.0, '#4CAF50')
+                    self._draw_voltage_bar(idx, 0.0, self.sensor_colors[idx])
         else:
             # No data yet, just draw threshold lines on empty bars
             for idx in range(4):
-                self._draw_voltage_bar(idx, 0.0, '#4CAF50')
+                self._draw_voltage_bar(idx, 0.0, self.sensor_colors[idx])
     
     def _on_threshold_marker_enter(self, event) -> None:
         """Change cursor to horizontal resize when hovering over threshold marker."""
@@ -497,8 +496,18 @@ class BottleSumoViewer(tk.Tk):
         return "break"  # Prevent event from bubbling to window drag handler
     
     def _on_threshold_drag_motion(self, event) -> None:
-        """Update threshold value while dragging marker."""
+        """Update threshold value for the specific sensor while dragging marker."""
         if not hasattr(self, '_dragging') or not self._dragging:
+            return "break"
+        
+        # Identify which sensor's canvas is being dragged
+        sensor_idx = None
+        for idx, canvas in enumerate(self.sensor_threshold_markers):
+            if canvas == event.widget:
+                sensor_idx = idx
+                break
+        
+        if sensor_idx is None:
             return "break"
         
         # Get canvas width (use actual width if rendered, fallback to 150px)
@@ -514,8 +523,8 @@ class BottleSumoViewer(tk.Tk):
         # Quantize to 0.1V steps for discrete movement
         voltage = round(voltage * 10) / 10
         
-        # Update threshold config (this will automatically update Spinbox via DoubleVar)
-        self.ir_threshold_config.set(voltage)
+        # Update the specific sensor's threshold config
+        self.ir_threshold_configs[sensor_idx].set(voltage)
         
         # Redraw all threshold markers immediately
         self._update_threshold_markers()
@@ -616,25 +625,32 @@ class BottleSumoViewer(tk.Tk):
         if "ack" in payload:
             # Successful command acknowledgment
             if payload["ack"] == "set_threshold":
+                sensor = payload.get("sensor", 0)
                 if payload.get("status") == "ok":
                     value = payload.get("value", 0)
                     # Update displayed firmware threshold to the confirmed value
                     try:
-                        self.firmware_ir_threshold_var.set(f"{float(value):.2f}V")
+                        current_thresholds = self.firmware_ir_threshold_var.get()
+                        if current_thresholds == "-":
+                            thresholds_list = ["-"] * 4
+                        else:
+                            thresholds_list = current_thresholds.split(", ")
+                        thresholds_list[sensor] = f"{float(value):.2f}V"
+                        self.firmware_ir_threshold_var.set(", ".join(thresholds_list))
                     except Exception:
                         self.firmware_ir_threshold_var.set(str(value))
-                    self.status_var.set(f"✅ Threshold updated: {float(value):.2f}V")
-                    print(f"[TCP] Firmware confirmed threshold: {value:.2f}V")
+                    self.status_var.set(f"✅ Sensor {sensor} threshold updated: {float(value):.2f}V")
+                    print(f"[TCP] Firmware confirmed sensor {sensor} threshold: {value:.2f}V")
                 else:
                     # Error response from firmware
                     error = payload.get("error", "unknown")
                     if error == "invalid_range":
                         min_val = payload.get("min", 0.1)
                         max_val = payload.get("max", 4.0)
-                        self.status_var.set(f"❌ Invalid range. Min: {min_val}V, Max: {max_val}V")
+                        self.status_var.set(f"❌ Sensor {sensor} invalid range. Min: {min_val}V, Max: {max_val}V")
                     else:
-                        self.status_var.set(f"❌ Error: {error}")
-                    print(f"[TCP] Firmware error: {error}")
+                        self.status_var.set(f"❌ Sensor {sensor} error: {error}")
+                    print(f"[TCP] Firmware error for sensor {sensor}: {error}")
         elif "error" in payload:
             # General error response
             error_msg = payload.get("error", "unknown")
@@ -660,23 +676,18 @@ class BottleSumoViewer(tk.Tk):
             self.sensor_raw_labels[idx].set(str(raw_value))
             self.sensor_voltage_labels[idx].set(f"{volt_value:.3f}" if isinstance(volt_value, (float, int)) else str(volt_value))
             
-            # Update Canvas-based voltage bar and color based on voltage zones
+            # Update Canvas-based voltage bar and color based on sensor-specific color
             if isinstance(volt_value, (float, int)):
                 bar_value = max(0.0, min(4.096, float(volt_value)))
                 
-                # Determine color based on voltage zone
-                if volt_value < 1.5:
-                    fill_color = '#4CAF50'  # Green
-                elif volt_value < 2.5:
-                    fill_color = '#FFC107'  # Yellow
-                else:
-                    fill_color = '#F44336'  # Red
+                # Use sensor-specific color for the bar
+                fill_color = self.sensor_colors[idx]
                 
                 # Draw voltage bar on Canvas
                 self._draw_voltage_bar(idx, bar_value, fill_color)
             else:
-                # No valid data, show empty bar (gray background only)
-                self._draw_voltage_bar(idx, 0.0, '#4CAF50')
+                # No valid data, show empty bar with sensor color
+                self._draw_voltage_bar(idx, 0.0, self.sensor_colors[idx])
 
         # Update ToF sensor data with color-coded bars
         for idx in range(3):

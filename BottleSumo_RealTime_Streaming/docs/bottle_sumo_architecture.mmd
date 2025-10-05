@@ -1,0 +1,45 @@
+flowchart TD
+subgraph Core0["Core 0 Control & Streaming"]
+  direction TB
+  C0Loop["loop() at 100 Hz"]
+  WiFi["WiFi AP & TCP Server"]
+  Stream["JSON builder"]
+  OLED["OLED Display Update (Wire1 bus)"]
+  Command["Runtime Threshold Handler"]
+end
+
+subgraph Core1["Core 1 Sensor Acquisition"]
+  direction TB
+  C1Loop["loop1() high-speed sensor loop"]
+  IR["ADS1115 QRE Array
+4 channels @ 860 SPS"]
+  ToFSeq["VL53L0X Sequenced Reads
+3 sensors, 35 ms each"]
+end
+
+subgraph Shared["Shared Sensor State"]
+  direction TB
+  SharedData["data_mutex-protected
+SharedSensorData"]
+  Threshold["runtime_edge_threshold"]
+end
+
+Sensors["Physical Sensors"]
+Motors["Motor Driver (future TODO)"]
+Clients["Streaming Clients up to 6"]
+
+C1Loop -->|"reads"| IR
+C1Loop -->|"locks wire1_mutex"| ToFSeq
+IR -->|"raw values + volts"| SharedData
+ToFSeq -->|"distance/status"| SharedData
+C0Loop -->|"mutex fetch"| SharedData
+Command -->|"set/get"| Threshold
+Threshold -->|"read"| C1Loop
+C0Loop --> WiFi
+WiFi --> Stream
+Stream -->|"20 Hz JSON"| Clients
+C0Loop -->|"get action"| Motors
+C0Loop -->|"200 ms"| OLED
+OLED -. "wire1_mutex" .- ToFSeq
+Sensors -. "physical wiring" .- IR
+Sensors -. "physical wiring" .- ToFSeq
