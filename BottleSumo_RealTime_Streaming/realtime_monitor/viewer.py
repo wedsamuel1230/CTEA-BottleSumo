@@ -170,6 +170,9 @@ class BottleSumoViewer(tk.Tk):
         # Store last telemetry packet for redrawing when threshold changes
         self._last_packet: Optional[TelemetryPacket] = None
         
+        # Flag to display firmware threshold only initially from telemetry
+        self.initial_threshold_displayed = False
+        
         # Configure custom progress bar styles for color coding
         self._setup_progress_bar_styles()
 
@@ -645,8 +648,10 @@ class BottleSumoViewer(tk.Tk):
         self.timestamp_var.set(f"{packet.timestamp}")
         self.status_var.set(time.strftime("Last update: %H:%M:%S"))
         
-        # Display firmware threshold values
-        self.firmware_ir_threshold_var.set(f"{packet.ir_edge_threshold:.2f}V")
+        # Display firmware threshold values (only initially from telemetry)
+        if not self.initial_threshold_displayed:
+            self.firmware_ir_threshold_var.set(f"{packet.ir_edge_threshold:.2f}V")
+            self.initial_threshold_displayed = True
         # Note: ToF detection threshold is not displayed in UI currently
         # Update IR sensor data with color-coded bars
         for idx in range(4):
