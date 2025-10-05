@@ -99,10 +99,10 @@ constexpr uint8_t TOF_FRONT_ADDRESS = 0x31;           // Front sensor I2C addres
 constexpr uint8_t TOF_LEFT_ADDRESS = 0x32;            // Left sensor I2C address
 
 // ToF Sensor Timing Configuration
-constexpr unsigned long TOF_TIMING_BUDGET_US = 20000; // 20ms per reading for ULTRA FAST mode
-constexpr uint8_t TOF_VCSEL_PRE_RANGE = 18;           // Pre-range pulse period (speed optimized)
-constexpr uint8_t TOF_VCSEL_FINAL_RANGE = 14;         // Final-range pulse period (speed optimized)
-constexpr unsigned long TOF_LOOP_DELAY_MS = 70;       // 70ms = 60ms read (3×20ms) + 10ms margin (~14Hz)
+constexpr unsigned long TOF_TIMING_BUDGET_US = 35000; // 30ms per reading for BALANCED mode (long-range accuracy)
+constexpr uint8_t TOF_VCSEL_PRE_RANGE = 14;           // Pre-range pulse period (balanced range/speed)
+constexpr uint8_t TOF_VCSEL_FINAL_RANGE = 10;         // Final-range pulse period (balanced range/speed)
+constexpr unsigned long TOF_LOOP_DELAY_MS = 115;      // 100ms = 90ms read (3×30ms) + 10ms margin (~10Hz)
 constexpr unsigned long TOF_RESET_DELAY_MS = 50;      // Full reset delay
 constexpr unsigned long TOF_POST_RESET_DELAY_MS = 20; // Post-reset sensor startup delay (minimal)
 
@@ -144,7 +144,7 @@ namespace Config {
   constexpr unsigned long CORE1_FAILURE_HALT_DELAY_MS = 1000;
   constexpr unsigned long STALE_DATA_DELAY_MS = 5;            // brief pause to let sensors catch up
   constexpr unsigned long STALE_WARNING_THROTTLE_MS = 1000;   // limit stale warning prints (ms)
-  constexpr unsigned long DATA_FRESHNESS_TOLERANCE_MS = 100;
+  constexpr unsigned long DATA_FRESHNESS_TOLERANCE_MS = 160;
   constexpr unsigned long STATUS_PRINT_INTERVAL_MS = 5000;
   constexpr int STATUS_PRINT_LOOP_INTERVAL = 100;
   constexpr int OLED_UPDATE_LOOP_INTERVAL = 50;  // Reduced from 25 to 50 (4Hz -> 2Hz)
@@ -618,7 +618,7 @@ bool initSensorSystem() {
 
 bool initToFSensors() {
   Serial.println("========================================");
-  Serial.println("ToF Sensor Initialization (ULTRA FAST)");
+  Serial.println("ToF Sensor Initialization (BALANCED MODE)");
   Serial.println("========================================");
   
   // NOTE: Wire1 already initialized by Core 0 in setup()
@@ -644,7 +644,7 @@ bool initToFSensors() {
     
     bool all_sensors_ok = true;
     
-    // Right sensor - ULTRA FAST timing
+    // Right sensor - BALANCED timing (long-range accuracy)
     digitalWrite(TOF_XSHUT_1, HIGH);
     delay(TOF_POST_RESET_DELAY_MS);
     if (!lox1.begin(TOF_RIGHT_ADDRESS, false, &Wire1)) {
@@ -655,12 +655,12 @@ bool initToFSensors() {
       continue;
     }
     
-    // ULTRA FAST: 20ms timing budget
+    // BALANCED: 50ms timing budget for long-range accuracy
     lox1.setMeasurementTimingBudgetMicroSeconds(TOF_TIMING_BUDGET_US);
     lox1.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_PRE_RANGE, TOF_VCSEL_PRE_RANGE);
     lox1.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_FINAL_RANGE, TOF_VCSEL_FINAL_RANGE);
     tofSensorInitialized[Config::TOF_INDEX_RIGHT] = true;
-    Serial.println("Right sensor: ULTRA FAST mode (20ms)");
+    Serial.println("Right sensor: BALANCED mode (50ms)");
 
     // Front sensor
     digitalWrite(TOF_XSHUT_2, HIGH);
@@ -677,7 +677,7 @@ bool initToFSensors() {
     lox2.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_PRE_RANGE, TOF_VCSEL_PRE_RANGE);
     lox2.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_FINAL_RANGE, TOF_VCSEL_FINAL_RANGE);
     tofSensorInitialized[Config::TOF_INDEX_FRONT] = true;
-    Serial.println("Front sensor: ULTRA FAST mode (20ms)");
+    Serial.println("Front sensor: BALANCED mode (50ms)");
 
     // Left sensor
     digitalWrite(TOF_XSHUT_3, HIGH);
@@ -694,7 +694,7 @@ bool initToFSensors() {
     lox3.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_PRE_RANGE, TOF_VCSEL_PRE_RANGE);
     lox3.setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_FINAL_RANGE, TOF_VCSEL_FINAL_RANGE);
     tofSensorInitialized[Config::TOF_INDEX_LEFT] = true;
-    Serial.println("Left sensor: ULTRA FAST mode (20ms)");
+    Serial.println("Left sensor: BALANCED mode (50ms)");
 
     if (all_sensors_ok) {
       Serial.println("All sensors initialized successfully!");
@@ -918,20 +918,37 @@ void handleClientCommand(WiFiClient &client, int clientSlot) {
       Serial.printf("📥 [插槽%d] 收到命令: %s\n", clientSlot, command.c_str());
       
       // Parse JSON command
-      // Expected format: {"cmd":"set_threshold","value":2.5}
-      int cmdStart = command.indexOf("\"cmd\":\"");
-      int valueStart = command.indexOf("\"value\":");
+      // Expected format: {"cmd":"set_threshold","value":2.5} or {"cmd": "set_threshold", "value": 2.5}
+      // Handle JSON with or without spaces after colons
+      int cmdStart = command.indexOf("\"cmd\"");
+      int valueStart = command.indexOf("\"value\"");
       
       if (cmdStart != -1 && valueStart != -1) {
         // Extract command type
-        cmdStart += 7;  // Skip "cmd":"
+        // Step 1: Find colon after "cmd" key
+        cmdStart = command.indexOf(":", cmdStart + 5);  // Find : after "cmd"
+        if (cmdStart == -1) goto malformed_json;
+        
+        // Step 2: Find opening quote of value (after colon)
+        cmdStart = command.indexOf("\"", cmdStart);  // Find opening " of value
+        if (cmdStart == -1) goto malformed_json;
+        cmdStart++;  // Move inside the string
+        
+        // Step 3: Find closing quote
         int cmdEnd = command.indexOf("\"", cmdStart);
+        if (cmdEnd == -1) goto malformed_json;
+        
+        // Step 4: Extract command string
         String cmdType = command.substring(cmdStart, cmdEnd);
         
         // Extract value
-        valueStart += 8;  // Skip "value":
+        // Find the colon after "value", then skip to number
+        valueStart = command.indexOf(":", valueStart + 7);  // Find colon after "value"
+        if (valueStart == -1) goto malformed_json;
+        valueStart++;  // Move past colon
         int valueEnd = command.indexOf(",", valueStart);
         if (valueEnd == -1) valueEnd = command.indexOf("}", valueStart);
+        if (valueEnd == -1) goto malformed_json;
         String valueStr = command.substring(valueStart, valueEnd);
         valueStr.trim();
         float value = valueStr.toFloat();
@@ -960,6 +977,7 @@ void handleClientCommand(WiFiClient &client, int clientSlot) {
         }
       } else {
         // Malformed JSON
+        malformed_json:
         String error = "{\"error\":\"malformed_json\"}\n";
         client.print(error);
         Serial.println("❌ JSON 格式錯誤");

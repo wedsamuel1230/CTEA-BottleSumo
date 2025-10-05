@@ -402,9 +402,15 @@ class BottleSumoViewer(tk.Tk):
             
             # Build JSON command: {"cmd":"set_threshold","value":2.5}
             import json
-            command = {"cmd": "set_threshold", "value": round(value, 2)}
+            command = {"cmd":"set_threshold","value":round(value, 2)}
             command_str = json.dumps(command) + "\n"
-            
+            # Update displayed firmware threshold immediately for UI feedback
+            # (previous code accidentally assigned to a local variable)
+            try:
+                self.firmware_ir_threshold_var.set(f"{float(value):.2f}V")
+            except Exception:
+                # Fallback: set raw value if conversion fails
+                self.firmware_ir_threshold_var.set(str(value))
             # Send command (non-blocking)
             sock.sendall(command_str.encode('utf-8'))
             
@@ -609,7 +615,12 @@ class BottleSumoViewer(tk.Tk):
             if payload["ack"] == "set_threshold":
                 if payload.get("status") == "ok":
                     value = payload.get("value", 0)
-                    self.status_var.set(f"✅ Threshold updated: {value:.2f}V")
+                    # Update displayed firmware threshold to the confirmed value
+                    try:
+                        self.firmware_ir_threshold_var.set(f"{float(value):.2f}V")
+                    except Exception:
+                        self.firmware_ir_threshold_var.set(str(value))
+                    self.status_var.set(f"✅ Threshold updated: {float(value):.2f}V")
                     print(f"[TCP] Firmware confirmed threshold: {value:.2f}V")
                 else:
                     # Error response from firmware
