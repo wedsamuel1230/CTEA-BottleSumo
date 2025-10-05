@@ -230,7 +230,7 @@ class BottleSumoViewer(tk.Tk):
             ttk.Label(sensors_frame, textvariable=volt_var).grid(row=idx + 1, column=2, sticky="w", padx=5)
             
             # Add progress bar for voltage visualization with Canvas overlay for threshold marker
-            bar_container = tk.Frame(sensors_frame)
+            bar_container = tk.Frame(sensors_frame, relief=tk.SUNKEN, borderwidth=1)
             bar_container.grid(row=idx + 1, column=3, sticky="ew", padx=5)
             
             progress_bar = ttk.Progressbar(bar_container, mode='determinate', length=150, maximum=4.096, 
@@ -519,8 +519,7 @@ class BottleSumoViewer(tk.Tk):
         
         # Display firmware threshold values
         self.firmware_ir_threshold_var.set(f"{packet.ir_edge_threshold:.2f}V")
-        self.firmware_tof_threshold_var.set(f"{packet.tof_detection_threshold}mm")
-
+        # Note: ToF detection threshold is not displayed in UI currently
         # Update IR sensor data with color-coded bars
         for idx in range(4):
             raw_value = packet.sensors_raw[idx] if idx < len(packet.sensors_raw) else "-"
