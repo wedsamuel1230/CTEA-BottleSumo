@@ -41,7 +41,7 @@ class TelemetryPacket:
     tof_object_direction: str = ""
     robot_state: Dict[str, Any] = field(default_factory=dict)
     system_info: Dict[str, Any] = field(default_factory=dict)
-    ir_edge_threshold: float = 2.5  # Default IR edge detection threshold (volts)
+    ir_edge_thresholds: list[float] = field(default_factory=lambda: [2.5, 2.5, 2.5, 2.5])  # Default IR edge detection thresholds (volts) for each sensor
     tof_detection_threshold: int = 1600  # Default ToF detection threshold (mm)
 
     @classmethod
@@ -57,6 +57,15 @@ class TelemetryPacket:
         distances = tofsensors.get("distance_mm", tofsensors.get("distances", []))
         direction = tofsensors.get("direction", tofsensors.get("object_direction", ""))
         
+        # Handle edge_threshold - can be single value (legacy) or list (new firmware)
+        edge_threshold_data = sensors.get("edge_threshold", [2.5, 2.5, 2.5, 2.5])
+        if isinstance(edge_threshold_data, list):
+            ir_edge_thresholds = [float(t) for t in edge_threshold_data]
+        else:
+            # Legacy single threshold - replicate for all 4 sensors
+            single_threshold = float(edge_threshold_data)
+            ir_edge_thresholds = [single_threshold] * 4
+
         return cls(
             timestamp=payload.get("timestamp", 0),
             sensors_raw=list(sensors.get("raw", [])),
@@ -67,7 +76,7 @@ class TelemetryPacket:
             tof_object_direction=direction,
             robot_state=dict(payload.get("robot_state", {})),
             system_info=dict(payload.get("system_info", {})),
-            ir_edge_threshold=float(sensors.get("edge_threshold", 2.5)),
+            ir_edge_thresholds=ir_edge_thresholds,
             tof_detection_threshold=int(tofsensors.get("detection_threshold", 1600)),
         )
 
@@ -273,19 +282,21 @@ class BottleSumoViewer(tk.Tk):
         
         # IR Edge Thresholds (one per sensor, user configurable)
         self.threshold_spinboxes = []
+        self.threshold_apply_buttons = []
         for idx in range(4):
             ttk.Label(threshold_frame, text=f"IR Sensor {idx} Threshold (V):").grid(row=idx, column=0, sticky="w", padx=5)
             spinbox = ttk.Spinbox(threshold_frame, from_=0.0, to=4.096, increment=0.1, 
                                   textvariable=self.ir_threshold_configs[idx], width=8)
             spinbox.grid(row=idx, column=1, sticky="w", padx=5)
+            apply_button = ttk.Button(threshold_frame, text="Apply", command=lambda i=idx: self._apply_single_threshold(i))
+            apply_button.grid(row=idx, column=2, sticky="w", padx=5)
             self.threshold_spinboxes.append(spinbox)
-        
-        ttk.Button(threshold_frame, text="Apply All", command=self._apply_threshold_changes).grid(row=4, column=0, columnspan=2, pady=(10, 0))
+            self.threshold_apply_buttons.append(apply_button)
         
         # Display firmware's threshold values (read-only)
-        ttk.Label(threshold_frame, text="Firmware IR Thresholds:").grid(row=5, column=0, sticky="w", padx=5)
+        ttk.Label(threshold_frame, text="Firmware IR Thresholds:").grid(row=4, column=0, sticky="w", padx=5)
         self.firmware_ir_threshold_var = tk.StringVar(value="-")
-        ttk.Label(threshold_frame, textvariable=self.firmware_ir_threshold_var).grid(row=5, column=1, sticky="w", padx=5)
+        ttk.Label(threshold_frame, textvariable=self.firmware_ir_threshold_var).grid(row=4, column=1, columnspan=2, sticky="w", padx=5)
         
         # ToF Sensors data ---------------------------------------------------
         tof_frame = ttk.LabelFrame(root, text="ToF Sensors (VL53L0X)", padding=8)
@@ -396,6 +407,24 @@ class BottleSumoViewer(tk.Tk):
         thresholds = [round(config.get(), 2) for config in self.ir_threshold_configs]
         self._send_threshold_commands(thresholds)
     
+    def _apply_single_threshold(self, sensor_idx: int) -> None:
+        """Apply threshold change for a single sensor.
+        
+        Args:
+            sensor_idx: Index of the sensor (0-3) to update
+        """
+        # Update GUI threshold markers
+        self._update_threshold_markers()
+        
+        # Check if connected before sending commands
+        if not self._reader_thread or not self._reader_thread.is_alive():
+            self.status_var.set("⚠️ Not connected. Connect first to apply thresholds.")
+            return
+        
+        # Send threshold command for single sensor
+        threshold_value = round(self.ir_threshold_configs[sensor_idx].get(), 2)
+        self._send_single_threshold_command(sensor_idx, threshold_value)
+    
     def _send_threshold_commands(self, thresholds: list[float]) -> None:
         """Send threshold configuration commands to Arduino firmware via TCP.
         
@@ -423,6 +452,33 @@ class BottleSumoViewer(tk.Tk):
         except Exception as e:
             self.status_var.set(f"❌ Failed to send commands: {e}")
             print(f"[TCP] Error sending commands: {e}")
+
+    def _send_single_threshold_command(self, sensor_idx: int, threshold_value: float) -> None:
+        """Send threshold configuration command for a single sensor to Arduino firmware via TCP.
+        
+        Args:
+            sensor_idx: Index of the sensor (0-3)
+            threshold_value: Threshold voltage value (0.1 - 4.0V)
+        """
+        try:
+            # Get socket from reader thread
+            if not hasattr(self._reader_thread, '_sock') or not self._reader_thread._sock:
+                self.status_var.set("❌ Connection socket not available")
+                return
+            
+            sock = self._reader_thread._sock
+            
+            # Build JSON command: {"cmd":"set_threshold","sensor":0,"value":2.5}
+            command = {"cmd":"set_threshold","sensor":sensor_idx,"value":threshold_value}
+            command_str = json.dumps(command) + "\n"
+            sock.sendall(command_str.encode('utf-8'))
+            print(f"[TCP] Sent command for sensor {sensor_idx}: {command_str.strip()}")
+            
+            self.status_var.set(f"📤 Sent threshold command for sensor {sensor_idx} (awaiting ack...)")
+            
+        except Exception as e:
+            self.status_var.set(f"❌ Failed to send command: {e}")
+            print(f"[TCP] Error sending command: {e}")
 
     def _draw_voltage_bar(self, sensor_idx: int, voltage: float, fill_color: str) -> None:
         """Draw voltage bar on Canvas with sensor-specific threshold line overlay.
@@ -666,7 +722,8 @@ class BottleSumoViewer(tk.Tk):
         
         # Display firmware threshold values (only initially from telemetry)
         if not self.initial_threshold_displayed:
-            self.firmware_ir_threshold_var.set(f"{packet.ir_edge_threshold:.2f}V")
+            thresholds_str = ", ".join(f"{t:.2f}V" for t in packet.ir_edge_thresholds)
+            self.firmware_ir_threshold_var.set(thresholds_str)
             self.initial_threshold_displayed = True
         # Note: ToF detection threshold is not displayed in UI currently
         # Update IR sensor data with color-coded bars
