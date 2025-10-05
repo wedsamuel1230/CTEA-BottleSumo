@@ -160,6 +160,9 @@ class BottleSumoViewer(tk.Tk):
         # Configurable threshold (user can adjust via UI)
         self.ir_threshold_config = tk.DoubleVar(value=2.5)  # Default 2.5V
         
+        # Store last telemetry packet for redrawing when threshold changes
+        self._last_packet: Optional[TelemetryPacket] = None
+        
         # Configure custom progress bar styles for color coding
         self._setup_progress_bar_styles()
 
@@ -229,30 +232,26 @@ class BottleSumoViewer(tk.Tk):
             ttk.Label(sensors_frame, textvariable=raw_var).grid(row=idx + 1, column=1, sticky="w", padx=5)
             ttk.Label(sensors_frame, textvariable=volt_var).grid(row=idx + 1, column=2, sticky="w", padx=5)
             
-            # Add progress bar for voltage visualization with Canvas overlay for threshold marker
+            # Add Canvas for voltage bar visualization with threshold marker overlay
+            # Canvas draws both the voltage-filled bar AND the draggable threshold line
             bar_container = tk.Frame(sensors_frame, relief=tk.SUNKEN, borderwidth=1)
             bar_container.grid(row=idx + 1, column=3, sticky="ew", padx=5)
             
-            progress_bar = ttk.Progressbar(bar_container, mode='determinate', length=150, maximum=4.096, 
-                                           style='IR.green.Horizontal.TProgressbar')
-            progress_bar.pack(fill='both', expand=True)
-            
-            # Canvas overlay for red threshold line (2px wide, positioned dynamically)
-            # Note: No bg parameter = transparent overlay over progress bar
-            threshold_canvas = tk.Canvas(bar_container, width=150, height=20, highlightthickness=0)
-            threshold_canvas.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+            # Canvas shows gray background (trough), voltage bar (colored fill), and threshold line
+            voltage_canvas = tk.Canvas(bar_container, width=150, height=20, highlightthickness=0, bg='#e0e0e0')
+            voltage_canvas.pack(fill='both', expand=True)
             
             # Bind mouse events for draggable threshold marker
-            threshold_canvas.bind("<Enter>", self._on_threshold_marker_enter)
-            threshold_canvas.bind("<Leave>", self._on_threshold_marker_leave)
-            threshold_canvas.bind("<Button-1>", self._on_threshold_drag_start)
-            threshold_canvas.bind("<B1-Motion>", self._on_threshold_drag_motion)
-            threshold_canvas.bind("<ButtonRelease-1>", self._on_threshold_drag_end)
+            voltage_canvas.bind("<Enter>", self._on_threshold_marker_enter)
+            voltage_canvas.bind("<Leave>", self._on_threshold_marker_leave)
+            voltage_canvas.bind("<Button-1>", self._on_threshold_drag_start)
+            voltage_canvas.bind("<B1-Motion>", self._on_threshold_drag_motion)
+            voltage_canvas.bind("<ButtonRelease-1>", self._on_threshold_drag_end)
             
             self.sensor_raw_labels.append(raw_var)
             self.sensor_voltage_labels.append(volt_var)
-            self.sensor_voltage_bars.append(progress_bar)
-            self.sensor_threshold_markers.append(threshold_canvas)
+            self.sensor_voltage_bars.append(voltage_canvas)  # Now stores Canvas instead of Progressbar
+            self.sensor_threshold_markers.append(voltage_canvas)  # Same Canvas for both bar and threshold
 
         # Threshold Configuration ---------------------------------------------------
         threshold_frame = ttk.LabelFrame(root, text="Threshold Configuration", padding=8)
@@ -376,22 +375,63 @@ class BottleSumoViewer(tk.Tk):
         # because firmware threshold (Config::EDGE_THRESHOLD_VOLTS at line 163) is constexpr
         # Future enhancement: modify firmware to accept runtime threshold commands via TCP
 
-    def _update_threshold_markers(self) -> None:
-        """Update red threshold line position on IR sensor progress bars based on configured threshold."""
-        threshold_voltage = self.ir_threshold_config.get()
+    def _draw_voltage_bar(self, sensor_idx: int, voltage: float, fill_color: str) -> None:
+        """Draw voltage bar on Canvas with threshold line overlay.
         
-        for idx, canvas in enumerate(self.sensor_threshold_markers):
-            canvas.delete('all')  # Clear previous lines
-            
-            # Calculate pixel position: threshold_voltage / 4.096V * canvas_width
-            # Use canvas.winfo_width() if rendered, otherwise use nominal 150px
-            canvas_width = canvas.winfo_width() if canvas.winfo_width() > 1 else 150
-            line_x = (threshold_voltage / 4.096) * canvas_width
-            
-            # Draw white outline first for visibility (halo effect when bar is red)
-            canvas.create_line(line_x, 0, line_x, 20, fill='#FFFFFF', width=4, tags='threshold_outline')
-            # Draw vertical red line (2px wide) on top
-            canvas.create_line(line_x, 0, line_x, 20, fill='#FF0000', width=2, tags='threshold')
+        Args:
+            sensor_idx: Index of sensor (0-3)
+            voltage: Voltage value (0-4.096V)
+            fill_color: Bar fill color (hex string like '#4CAF50')
+        """
+        canvas = self.sensor_voltage_bars[sensor_idx]
+        canvas.delete('all')  # Clear previous drawing
+        
+        canvas_width = canvas.winfo_width() if canvas.winfo_width() > 1 else 150
+        canvas_height = canvas.winfo_height() if canvas.winfo_height() > 1 else 20
+        
+        # Calculate fill width based on voltage (0-4.096V range)
+        fill_width = (voltage / 4.096) * canvas_width
+        
+        # Draw filled rectangle for voltage level
+        if fill_width > 0:
+            canvas.create_rectangle(0, 0, fill_width, canvas_height, fill=fill_color, outline='')
+        
+        # Draw threshold line on top
+        threshold_voltage = self.ir_threshold_config.get()
+        line_x = (threshold_voltage / 4.096) * canvas_width
+        
+        # White outline for visibility
+        canvas.create_line(line_x, 0, line_x, canvas_height, fill='#FFFFFF', width=4, tags='threshold_outline')
+        # Red line on top
+        canvas.create_line(line_x, 0, line_x, canvas_height, fill='#FF0000', width=2, tags='threshold')
+
+    def _update_threshold_markers(self) -> None:
+        """Update red threshold line position on IR sensor Canvas displays.
+        
+        Note: Since Canvas now draws both voltage bar AND threshold line,
+        we need to redraw everything when threshold changes.
+        """
+        # Trigger a full redraw of all voltage bars with current values
+        # This will redraw both the bar and the new threshold position
+        if hasattr(self, '_last_packet') and self._last_packet:
+            # Re-process last packet to redraw bars with new threshold
+            for idx in range(4):
+                volt_value = self._last_packet.sensors_voltage[idx] if idx < len(self._last_packet.sensors_voltage) else None
+                if isinstance(volt_value, (float, int)):
+                    bar_value = max(0.0, min(4.096, float(volt_value)))
+                    if volt_value < 1.5:
+                        fill_color = '#4CAF50'  # Green
+                    elif volt_value < 2.5:
+                        fill_color = '#FFC107'  # Yellow
+                    else:
+                        fill_color = '#F44336'  # Red
+                    self._draw_voltage_bar(idx, bar_value, fill_color)
+                else:
+                    self._draw_voltage_bar(idx, 0.0, '#4CAF50')
+        else:
+            # No data yet, just draw threshold lines on empty bars
+            for idx in range(4):
+                self._draw_voltage_bar(idx, 0.0, '#4CAF50')
     
     def _on_threshold_marker_enter(self, event) -> None:
         """Change cursor to horizontal resize when hovering over threshold marker."""
@@ -514,6 +554,9 @@ class BottleSumoViewer(tk.Tk):
         self._schedule_queue_processing()
 
     def _update_display(self, packet: TelemetryPacket) -> None:
+        # Store packet for threshold marker redraws
+        self._last_packet = packet
+        
         self.timestamp_var.set(f"{packet.timestamp}")
         self.status_var.set(time.strftime("Last update: %H:%M:%S"))
         
@@ -527,21 +570,23 @@ class BottleSumoViewer(tk.Tk):
             self.sensor_raw_labels[idx].set(str(raw_value))
             self.sensor_voltage_labels[idx].set(f"{volt_value:.3f}" if isinstance(volt_value, (float, int)) else str(volt_value))
             
-            # Update progress bar value and color style based on voltage zones
+            # Update Canvas-based voltage bar and color based on voltage zones
             if isinstance(volt_value, (float, int)):
                 bar_value = max(0.0, min(4.096, float(volt_value)))
-                self.sensor_voltage_bars[idx]['value'] = bar_value
                 
-                # Determine color zone: Green (0-1.5V) → Yellow (1.5-2.5V) → Red (>2.5V)
+                # Determine color based on voltage zone
                 if volt_value < 1.5:
-                    self.sensor_voltage_bars[idx].configure(style='IR.green.Horizontal.TProgressbar')
+                    fill_color = '#4CAF50'  # Green
                 elif volt_value < 2.5:
-                    self.sensor_voltage_bars[idx].configure(style='IR.yellow.Horizontal.TProgressbar')
+                    fill_color = '#FFC107'  # Yellow
                 else:
-                    self.sensor_voltage_bars[idx].configure(style='IR.red.Horizontal.TProgressbar')
+                    fill_color = '#F44336'  # Red
+                
+                # Draw voltage bar on Canvas
+                self._draw_voltage_bar(idx, bar_value, fill_color)
             else:
-                self.sensor_voltage_bars[idx]['value'] = 0.0
-                self.sensor_voltage_bars[idx].configure(style='IR.green.Horizontal.TProgressbar')
+                # No valid data, show empty bar (gray background only)
+                self._draw_voltage_bar(idx, 0.0, '#4CAF50')
 
         # Update ToF sensor data with color-coded bars
         for idx in range(3):
