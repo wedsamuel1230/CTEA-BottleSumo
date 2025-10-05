@@ -945,7 +945,8 @@ String buildIrSensorStreamPayload(const QRE_AllSensors &sensors) {
   payload += "\"voltage\":[" + String(sensors.sensor[0].voltage, 3) + "," +
              String(sensors.sensor[1].voltage, 3) + "," +
              String(sensors.sensor[2].voltage, 3) + "," +
-             String(sensors.sensor[3].voltage, 3) + "]";
+             String(sensors.sensor[3].voltage, 3) + "],";
+  payload += "\"edge_threshold\":" + String(Config::EDGE_THRESHOLD_VOLTS, 2);
   payload += "}";
   return payload;
 }
@@ -967,7 +968,8 @@ String buildTofSensorStreamPayload(const ToFReadings &tofReadings) {
              String(tofReadings.status[Config::TOF_INDEX_RIGHT]) + "," +
              String(tofReadings.status[Config::TOF_INDEX_FRONT]) + "," +
              String(tofReadings.status[Config::TOF_INDEX_LEFT]) + "],";
-  payload += "\"direction\":\"" + tofReadings.getDirection() + "\"";
+  payload += "\"direction\":\"" + tofReadings.getDirection() + "\",";
+  payload += "\"detection_threshold\":" + String(TOF_DETECTION_THRESHOLD_MM);
   payload += "}";
   return payload;
 }

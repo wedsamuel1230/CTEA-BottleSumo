@@ -41,6 +41,8 @@ class TelemetryPacket:
     tof_object_direction: str = ""
     robot_state: Dict[str, Any] = field(default_factory=dict)
     system_info: Dict[str, Any] = field(default_factory=dict)
+    ir_edge_threshold: float = 2.5  # Default IR edge detection threshold (volts)
+    tof_detection_threshold: int = 1600  # Default ToF detection threshold (mm)
 
     @classmethod
     def from_json(cls, payload: Dict[str, Any]) -> "TelemetryPacket":
@@ -65,6 +67,8 @@ class TelemetryPacket:
             tof_object_direction=direction,
             robot_state=dict(payload.get("robot_state", {})),
             system_info=dict(payload.get("system_info", {})),
+            ir_edge_threshold=float(sensors.get("edge_threshold", 2.5)),
+            tof_detection_threshold=int(tofsensors.get("detection_threshold", 1600)),
         )
 
 
@@ -143,8 +147,8 @@ class BottleSumoViewer(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Bottle Sumo Real-Time Viewer")
-        self.geometry("650x700")
-        self.minsize(600, 700)
+        self.geometry("650x750")  # Increased height for threshold config UI
+        self.minsize(600, 750)
 
         self._reader_thread: Optional[TelemetryReader] = None
         self._queue: "queue.Queue[TelemetryPacket | Exception]" = queue.Queue()
@@ -152,6 +156,12 @@ class BottleSumoViewer(tk.Tk):
         # Variables for window dragging
         self._drag_start_x = 0
         self._drag_start_y = 0
+        
+        # Configurable threshold (user can adjust via UI)
+        self.ir_threshold_config = tk.DoubleVar(value=2.5)  # Default 2.5V
+        
+        # Configure custom progress bar styles for color coding
+        self._setup_progress_bar_styles()
 
         self._build_ui()
         self._setup_window_drag()
@@ -160,6 +170,20 @@ class BottleSumoViewer(tk.Tk):
     # ------------------------------------------------------------------
     # UI construction helpers
     # ------------------------------------------------------------------
+    def _setup_progress_bar_styles(self) -> None:
+        """Configure ttk.Style for color-coded progress bars (green/yellow/red zones)."""
+        style = ttk.Style()
+        
+        # IR Sensor styles (voltage-based)
+        style.configure('IR.green.Horizontal.TProgressbar', troughcolor='#e0e0e0', background='#4CAF50')  # Green
+        style.configure('IR.yellow.Horizontal.TProgressbar', troughcolor='#e0e0e0', background='#FFC107')  # Yellow
+        style.configure('IR.red.Horizontal.TProgressbar', troughcolor='#e0e0e0', background='#F44336')  # Red
+        
+        # ToF Sensor styles (distance-based, inverse logic: closer = more danger)
+        style.configure('ToF.green.Horizontal.TProgressbar', troughcolor='#e0e0e0', background='#4CAF50')  # Green
+        style.configure('ToF.yellow.Horizontal.TProgressbar', troughcolor='#e0e0e0', background='#FFC107')  # Yellow
+        style.configure('ToF.red.Horizontal.TProgressbar', troughcolor='#e0e0e0', background='#F44336')  # Red
+    
     def _build_ui(self) -> None:
         root = ttk.Frame(self, padding=12)
         root.grid(row=0, column=0, sticky="nsew")
@@ -196,6 +220,8 @@ class BottleSumoViewer(tk.Tk):
         self.sensor_raw_labels: list[tk.StringVar] = []
         self.sensor_voltage_labels: list[tk.StringVar] = []
         self.sensor_voltage_bars: list[ttk.Progressbar] = []
+        self.sensor_threshold_markers: list[tk.Canvas] = []  # Canvas overlays for threshold lines
+        
         for idx in range(4):
             ttk.Label(sensors_frame, text=f"Sensor {idx}").grid(row=idx + 1, column=0, sticky="w", padx=5)
             raw_var = tk.StringVar(value="-")
@@ -203,17 +229,55 @@ class BottleSumoViewer(tk.Tk):
             ttk.Label(sensors_frame, textvariable=raw_var).grid(row=idx + 1, column=1, sticky="w", padx=5)
             ttk.Label(sensors_frame, textvariable=volt_var).grid(row=idx + 1, column=2, sticky="w", padx=5)
             
-            # Add progress bar for voltage visualization (0-3.3V range typical for ESP32)
-            progress_bar = ttk.Progressbar(sensors_frame, mode='determinate', length=150, maximum=3.3)
-            progress_bar.grid(row=idx + 1, column=3, sticky="ew", padx=5)
+            # Add progress bar for voltage visualization with Canvas overlay for threshold marker
+            bar_container = tk.Frame(sensors_frame)
+            bar_container.grid(row=idx + 1, column=3, sticky="ew", padx=5)
+            
+            progress_bar = ttk.Progressbar(bar_container, mode='determinate', length=150, maximum=3.3, 
+                                           style='IR.green.Horizontal.TProgressbar')
+            progress_bar.pack(fill='both', expand=True)
+            
+            # Canvas overlay for red threshold line (2px wide, positioned dynamically)
+            # Note: No bg parameter = transparent overlay over progress bar
+            threshold_canvas = tk.Canvas(bar_container, width=150, height=20, highlightthickness=0)
+            threshold_canvas.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+            
+            # Bind mouse events for draggable threshold marker
+            threshold_canvas.bind("<Enter>", self._on_threshold_marker_enter)
+            threshold_canvas.bind("<Leave>", self._on_threshold_marker_leave)
+            threshold_canvas.bind("<Button-1>", self._on_threshold_drag_start)
+            threshold_canvas.bind("<B1-Motion>", self._on_threshold_drag_motion)
+            threshold_canvas.bind("<ButtonRelease-1>", self._on_threshold_drag_end)
             
             self.sensor_raw_labels.append(raw_var)
             self.sensor_voltage_labels.append(volt_var)
             self.sensor_voltage_bars.append(progress_bar)
+            self.sensor_threshold_markers.append(threshold_canvas)
 
+        # Threshold Configuration ---------------------------------------------------
+        threshold_frame = ttk.LabelFrame(root, text="Threshold Configuration", padding=8)
+        threshold_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        threshold_frame.columnconfigure(1, weight=1)
+        
+        # IR Edge Threshold (user configurable)
+        ttk.Label(threshold_frame, text="IR Edge Threshold (V):").grid(row=0, column=0, sticky="w", padx=5)
+        threshold_spinbox = ttk.Spinbox(threshold_frame, from_=0.0, to=3.3, increment=0.1, 
+                                        textvariable=self.ir_threshold_config, width=8)
+        threshold_spinbox.grid(row=0, column=1, sticky="w", padx=5)
+        ttk.Button(threshold_frame, text="Apply", command=self._update_threshold_markers).grid(row=0, column=2, padx=5)
+        
+        # Display firmware's threshold values (read-only)
+        ttk.Label(threshold_frame, text="Firmware IR Threshold:").grid(row=1, column=0, sticky="w", padx=5)
+        self.firmware_ir_threshold_var = tk.StringVar(value="-")
+        ttk.Label(threshold_frame, textvariable=self.firmware_ir_threshold_var).grid(row=1, column=1, sticky="w", padx=5)
+        
+        ttk.Label(threshold_frame, text="Firmware ToF Threshold:").grid(row=2, column=0, sticky="w", padx=5)
+        self.firmware_tof_threshold_var = tk.StringVar(value="-")
+        ttk.Label(threshold_frame, textvariable=self.firmware_tof_threshold_var).grid(row=2, column=1, sticky="w", padx=5)
+        
         # ToF Sensors data ---------------------------------------------------
         tof_frame = ttk.LabelFrame(root, text="ToF Sensors (VL53L0X)", padding=8)
-        tof_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        tof_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         tof_frame.columnconfigure(3, weight=1)  # Make proximity bar column expandable
 
         ttk.Label(tof_frame, text="Direction").grid(row=0, column=0, padx=4, sticky="w")
@@ -248,7 +312,7 @@ class BottleSumoViewer(tk.Tk):
 
         # Robot state --------------------------------------------------------
         state_frame = ttk.LabelFrame(root, text="Robot State", padding=8)
-        state_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        state_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         state_frame.columnconfigure(1, weight=1)
 
         self.action_var = tk.StringVar(value="-")
@@ -269,7 +333,7 @@ class BottleSumoViewer(tk.Tk):
 
         # System info --------------------------------------------------------
         system_frame = ttk.LabelFrame(root, text="System Info", padding=8)
-        system_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        system_frame.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         system_frame.columnconfigure(1, weight=1)
 
         self.timestamp_var = tk.StringVar(value="-")
@@ -295,9 +359,72 @@ class BottleSumoViewer(tk.Tk):
         # Status bar ---------------------------------------------------------
         self.status_var = tk.StringVar(value="Idle")
         status_bar = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, anchor="w")
-        status_bar.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        status_bar.grid(row=6, column=0, sticky="ew", pady=(10, 0))
 
         root.rowconfigure(1, weight=1)
+        
+        # Initialize threshold markers after UI is built
+        self._update_threshold_markers()
+
+    def _update_threshold_markers(self) -> None:
+        """Update red threshold line position on IR sensor progress bars based on configured threshold."""
+        threshold_voltage = self.ir_threshold_config.get()
+        
+        for idx, canvas in enumerate(self.sensor_threshold_markers):
+            canvas.delete('all')  # Clear previous lines
+            
+            # Calculate pixel position: threshold_voltage / 3.3V * canvas_width
+            # Use canvas.winfo_width() if rendered, otherwise use nominal 150px
+            canvas_width = canvas.winfo_width() if canvas.winfo_width() > 1 else 150
+            line_x = (threshold_voltage / 3.3) * canvas_width
+            
+            # Draw vertical red line (2px wide) from top to bottom of canvas
+            canvas.create_line(line_x, 0, line_x, 20, fill='#FF0000', width=2, tags='threshold')
+
+    def _on_threshold_marker_enter(self, event) -> None:
+        """Change cursor to horizontal resize when hovering over threshold marker."""
+        event.widget.config(cursor="sb_h_double_arrow")
+    
+    def _on_threshold_marker_leave(self, event) -> None:
+        """Restore default cursor when leaving threshold marker."""
+        event.widget.config(cursor="")
+    
+    def _on_threshold_drag_start(self, event) -> None:
+        """Start dragging threshold marker."""
+        # Store initial drag position (optional, for future enhancements)
+        self._dragging = True
+        return "break"  # Prevent event from bubbling to window drag handler
+    
+    def _on_threshold_drag_motion(self, event) -> None:
+        """Update threshold value while dragging marker."""
+        if not hasattr(self, '_dragging') or not self._dragging:
+            return "break"
+        
+        # Get canvas width (use actual width if rendered, fallback to 150px)
+        canvas = event.widget
+        canvas_width = canvas.winfo_width() if canvas.winfo_width() > 1 else 150
+        
+        # Convert mouse X position to voltage (0-3.3V range)
+        voltage = (event.x / canvas_width) * 3.3
+        
+        # Clamp voltage to valid range
+        voltage = max(0.0, min(3.3, voltage))
+        
+        # Quantize to 0.1V steps for discrete movement
+        voltage = round(voltage * 10) / 10
+        
+        # Update threshold config (this will automatically update Spinbox via DoubleVar)
+        self.ir_threshold_config.set(voltage)
+        
+        # Redraw all threshold markers immediately
+        self._update_threshold_markers()
+        
+        return "break"  # Prevent event from bubbling to window drag handler
+    
+    def _on_threshold_drag_end(self, event) -> None:
+        """Finish dragging threshold marker."""
+        self._dragging = False
+        return "break"  # Prevent event from bubbling to window drag handler
 
     def _setup_window_drag(self) -> None:
         """Enable dragging the window by clicking and dragging on the title bar or background."""
@@ -377,22 +504,35 @@ class BottleSumoViewer(tk.Tk):
     def _update_display(self, packet: TelemetryPacket) -> None:
         self.timestamp_var.set(f"{packet.timestamp}")
         self.status_var.set(time.strftime("Last update: %H:%M:%S"))
+        
+        # Display firmware threshold values
+        self.firmware_ir_threshold_var.set(f"{packet.ir_edge_threshold:.2f}V")
+        self.firmware_tof_threshold_var.set(f"{packet.tof_detection_threshold}mm")
 
-        # Update IR sensor data
+        # Update IR sensor data with color-coded bars
         for idx in range(4):
             raw_value = packet.sensors_raw[idx] if idx < len(packet.sensors_raw) else "-"
             volt_value = packet.sensors_voltage[idx] if idx < len(packet.sensors_voltage) else "-"
             self.sensor_raw_labels[idx].set(str(raw_value))
             self.sensor_voltage_labels[idx].set(f"{volt_value:.3f}" if isinstance(volt_value, (float, int)) else str(volt_value))
             
-            # Update progress bar to reflect voltage (clamp between 0 and 3.3V)
+            # Update progress bar value and color style based on voltage zones
             if isinstance(volt_value, (float, int)):
                 bar_value = max(0.0, min(3.3, float(volt_value)))
                 self.sensor_voltage_bars[idx]['value'] = bar_value
+                
+                # Determine color zone: Green (0-1.5V) → Yellow (1.5-2.5V) → Red (>2.5V)
+                if volt_value < 1.5:
+                    self.sensor_voltage_bars[idx].configure(style='IR.green.Horizontal.TProgressbar')
+                elif volt_value < 2.5:
+                    self.sensor_voltage_bars[idx].configure(style='IR.yellow.Horizontal.TProgressbar')
+                else:
+                    self.sensor_voltage_bars[idx].configure(style='IR.red.Horizontal.TProgressbar')
             else:
                 self.sensor_voltage_bars[idx]['value'] = 0.0
+                self.sensor_voltage_bars[idx].configure(style='IR.green.Horizontal.TProgressbar')
 
-        # Update ToF sensor data
+        # Update ToF sensor data with color-coded bars
         for idx in range(3):
             distance_value = packet.tof_distances[idx] if idx < len(packet.tof_distances) else "-"
             valid = packet.tof_valid[idx] if idx < len(packet.tof_valid) else False
@@ -405,10 +545,20 @@ class BottleSumoViewer(tk.Tk):
                 # Clamp distance to 0-2000mm, then invert so bar fills as object approaches
                 proximity_value = max(0, 2000 - min(2000, distance_value))
                 self.tof_proximity_bars[idx]['value'] = proximity_value
+                
+                # Determine color zone based on actual distance (not proximity):
+                # Green (>=1200mm far) → Yellow (400-1199mm medium) → Red (<400mm close)
+                if distance_value >= 1200:
+                    self.tof_proximity_bars[idx].configure(style='ToF.green.Horizontal.TProgressbar')
+                elif distance_value >= 400:
+                    self.tof_proximity_bars[idx].configure(style='ToF.yellow.Horizontal.TProgressbar')
+                else:
+                    self.tof_proximity_bars[idx].configure(style='ToF.red.Horizontal.TProgressbar')
             else:
                 self.tof_distance_labels[idx].set("-")
                 self.tof_status_labels[idx].set(f"Error ({status})" if status != "-" else "-")
                 self.tof_proximity_bars[idx]['value'] = 0
+                self.tof_proximity_bars[idx].configure(style='ToF.green.Horizontal.TProgressbar')
         
         # Update ToF object direction
         self.tof_object_direction_var.set(packet.tof_object_direction if packet.tof_object_direction else "-")
