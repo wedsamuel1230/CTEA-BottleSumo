@@ -20,7 +20,7 @@ from tkinter import messagebox, ttk
 from typing import Any, Dict, Optional
 
 # Default connection settings that match the firmware (`TCP_SERVER_PORT = 4242`).
-DEFAULT_HOST = "10.30.213.47"
+DEFAULT_HOST = "192.168.42.1"
 DEFAULT_PORT = 4242
 
 # Socket settings.
@@ -48,17 +48,21 @@ class TelemetryPacket:
         # IR sensors (legacy name 'sensors' or new name 'irsensors')
         sensors = payload.get("irsensors", payload.get("sensors", {}))
         
-        # ToF sensors
-        tofsensors = payload.get("tofsensors", {})
+        # ToF sensors - support both 'tof' (new firmware) and 'tofsensors' (legacy)
+        tofsensors = payload.get("tof", payload.get("tofsensors", {}))
+        
+        # Map field names: firmware uses 'distance_mm' and 'direction', viewer expects 'distances' and 'object_direction'
+        distances = tofsensors.get("distance_mm", tofsensors.get("distances", []))
+        direction = tofsensors.get("direction", tofsensors.get("object_direction", ""))
         
         return cls(
             timestamp=payload.get("timestamp", 0),
             sensors_raw=list(sensors.get("raw", [])),
             sensors_voltage=list(sensors.get("voltage", [])),
-            tof_distances=list(tofsensors.get("distances", [])),
+            tof_distances=list(distances),
             tof_valid=list(tofsensors.get("valid", [])),
             tof_status=list(tofsensors.get("status", [])),
-            tof_object_direction=tofsensors.get("object_direction", ""),
+            tof_object_direction=direction,
             robot_state=dict(payload.get("robot_state", {})),
             system_info=dict(payload.get("system_info", {})),
         )
@@ -210,14 +214,16 @@ class BottleSumoViewer(tk.Tk):
         # ToF Sensors data ---------------------------------------------------
         tof_frame = ttk.LabelFrame(root, text="ToF Sensors (VL53L0X)", padding=8)
         tof_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        tof_frame.columnconfigure(1, weight=1)
+        tof_frame.columnconfigure(3, weight=1)  # Make proximity bar column expandable
 
         ttk.Label(tof_frame, text="Direction").grid(row=0, column=0, padx=4, sticky="w")
         ttk.Label(tof_frame, text="Distance (mm)").grid(row=0, column=1, padx=4, sticky="w")
         ttk.Label(tof_frame, text="Status").grid(row=0, column=2, padx=4, sticky="w")
+        ttk.Label(tof_frame, text="Proximity").grid(row=0, column=3, padx=4, sticky="w")
 
         self.tof_distance_labels: list[tk.StringVar] = []
         self.tof_status_labels: list[tk.StringVar] = []
+        self.tof_proximity_bars: list[ttk.Progressbar] = []
         tof_directions = ["Right", "Front", "Left"]
         
         for idx, direction in enumerate(tof_directions):
@@ -226,8 +232,15 @@ class BottleSumoViewer(tk.Tk):
             status_var = tk.StringVar(value="-")
             ttk.Label(tof_frame, textvariable=distance_var).grid(row=idx + 1, column=1, sticky="w", padx=5)
             ttk.Label(tof_frame, textvariable=status_var).grid(row=idx + 1, column=2, sticky="w", padx=5)
+            
+            # Add progress bar for proximity visualization (0-2000mm range, inverse display)
+            # Bar fills MORE as object gets CLOSER (provides intuitive threat/proximity indication)
+            proximity_bar = ttk.Progressbar(tof_frame, mode='determinate', length=150, maximum=2000)
+            proximity_bar.grid(row=idx + 1, column=3, sticky="ew", padx=5)
+            
             self.tof_distance_labels.append(distance_var)
             self.tof_status_labels.append(status_var)
+            self.tof_proximity_bars.append(proximity_bar)
 
         self.tof_object_direction_var = tk.StringVar(value="-")
         ttk.Label(tof_frame, text="Object Direction:").grid(row=4, column=0, sticky="w")
@@ -388,9 +401,14 @@ class BottleSumoViewer(tk.Tk):
             if isinstance(distance_value, int) and valid:
                 self.tof_distance_labels[idx].set(f"{distance_value} mm")
                 self.tof_status_labels[idx].set("✓ Valid")
+                # Update proximity bar (inverse: closer = more filled)
+                # Clamp distance to 0-2000mm, then invert so bar fills as object approaches
+                proximity_value = max(0, 2000 - min(2000, distance_value))
+                self.tof_proximity_bars[idx]['value'] = proximity_value
             else:
                 self.tof_distance_labels[idx].set("-")
                 self.tof_status_labels[idx].set(f"Error ({status})" if status != "-" else "-")
+                self.tof_proximity_bars[idx]['value'] = 0
         
         # Update ToF object direction
         self.tof_object_direction_var.set(packet.tof_object_direction if packet.tof_object_direction else "-")
