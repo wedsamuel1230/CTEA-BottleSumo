@@ -133,8 +133,15 @@ class TelemetryReader(threading.Thread):
                     continue
                 try:
                     payload = json.loads(message)
-                    packet = TelemetryPacket.from_json(payload)
-                    self._output_queue.put(packet)
+                    
+                    # Check if this is an acknowledgment message (not telemetry)
+                    if "ack" in payload or "error" in payload:
+                        # Pass acknowledgment/error to GUI (wrapped in dict for identification)
+                        self._output_queue.put({"_type": "ack", "payload": payload})
+                    else:
+                        # Regular telemetry packet
+                        packet = TelemetryPacket.from_json(payload)
+                        self._output_queue.put(packet)
                 except json.JSONDecodeError as exc:
                     self._output_queue.put(exc)
 
@@ -362,18 +369,51 @@ class BottleSumoViewer(tk.Tk):
         self._update_threshold_markers()
 
     def _apply_threshold_changes(self) -> None:
-        """Apply threshold changes: update GUI markers and attempt to send command to firmware.
+        """Apply threshold changes: update GUI markers and send command to firmware.
         
-        Note: Firmware threshold is currently a compile-time constant (constexpr) and cannot be 
-        changed at runtime. This method updates the GUI and prepares infrastructure for future 
-        firmware command support.
+        Sends a TCP command to the Arduino firmware to update the runtime threshold value.
+        The firmware will acknowledge the command and immediately start using the new threshold.
         """
         # Update GUI threshold markers
         self._update_threshold_markers()
         
-        # Note: TCP command transmission to firmware is not implemented in this version
-        # because firmware threshold (Config::EDGE_THRESHOLD_VOLTS at line 163) is constexpr
-        # Future enhancement: modify firmware to accept runtime threshold commands via TCP
+        # Check if connected before sending command
+        if not self._reader_thread or not self._reader_thread.is_alive():
+            self.status_var.set("⚠️ Not connected. Connect first to apply threshold.")
+            return
+        
+        # Send threshold command to firmware
+        threshold_value = self.ir_threshold_config.get()
+        self._send_threshold_command(threshold_value)
+    
+    def _send_threshold_command(self, value: float) -> None:
+        """Send threshold configuration command to Arduino firmware via TCP.
+        
+        Args:
+            value: Threshold voltage value (0.1 - 4.0V)
+        """
+        try:
+            # Get socket from reader thread
+            if not hasattr(self._reader_thread, '_sock') or not self._reader_thread._sock:
+                self.status_var.set("❌ Connection socket not available")
+                return
+            
+            sock = self._reader_thread._sock
+            
+            # Build JSON command: {"cmd":"set_threshold","value":2.5}
+            import json
+            command = {"cmd": "set_threshold", "value": round(value, 2)}
+            command_str = json.dumps(command) + "\n"
+            
+            # Send command (non-blocking)
+            sock.sendall(command_str.encode('utf-8'))
+            
+            self.status_var.set(f"📤 Sent threshold command: {value:.2f}V (awaiting ack...)")
+            print(f"[TCP] Sent command: {command_str.strip()}")
+            
+        except Exception as e:
+            self.status_var.set(f"❌ Failed to send command: {e}")
+            print(f"[TCP] Error sending command: {e}")
 
     def _draw_voltage_bar(self, sensor_idx: int, voltage: float, fill_color: str) -> None:
         """Draw voltage bar on Canvas with threshold line overlay.
@@ -547,11 +587,45 @@ class BottleSumoViewer(tk.Tk):
                 messagebox.showerror("Connection Error", str(item))
                 self._disconnect()
                 break
+            
+            # Check if this is an acknowledgment message (not telemetry)
+            if isinstance(item, dict) and item.get("_type") == "ack":
+                self._handle_acknowledgment(item["payload"])
+                continue
 
             assert isinstance(item, TelemetryPacket)
             self._update_display(item)
 
         self._schedule_queue_processing()
+    
+    def _handle_acknowledgment(self, payload: dict) -> None:
+        """Handle acknowledgment or error response from Arduino firmware.
+        
+        Args:
+            payload: JSON payload containing 'ack' or 'error' fields
+        """
+        if "ack" in payload:
+            # Successful command acknowledgment
+            if payload["ack"] == "set_threshold":
+                if payload.get("status") == "ok":
+                    value = payload.get("value", 0)
+                    self.status_var.set(f"✅ Threshold updated: {value:.2f}V")
+                    print(f"[TCP] Firmware confirmed threshold: {value:.2f}V")
+                else:
+                    # Error response from firmware
+                    error = payload.get("error", "unknown")
+                    if error == "invalid_range":
+                        min_val = payload.get("min", 0.1)
+                        max_val = payload.get("max", 4.0)
+                        self.status_var.set(f"❌ Invalid range. Min: {min_val}V, Max: {max_val}V")
+                    else:
+                        self.status_var.set(f"❌ Error: {error}")
+                    print(f"[TCP] Firmware error: {error}")
+        elif "error" in payload:
+            # General error response
+            error_msg = payload.get("error", "unknown")
+            self.status_var.set(f"❌ Error: {error_msg}")
+            print(f"[TCP] Error response: {error_msg}")
 
     def _update_display(self, packet: TelemetryPacket) -> None:
         # Store packet for threshold marker redraws
@@ -598,15 +672,15 @@ class BottleSumoViewer(tk.Tk):
                 self.tof_distance_labels[idx].set(f"{distance_value} mm")
                 self.tof_status_labels[idx].set("✓ Valid")
                 # Update proximity bar (inverse: closer = more filled)
-                # Clamp distance to 0-2000mm, then invert so bar fills as object approaches
-                proximity_value = max(0, 2000 - min(2000, distance_value))
+                # Clamp distance to 0-1500mm, then invert so bar fills as object approaches
+                proximity_value = max(0, 1500 - min(1500, distance_value))
                 self.tof_proximity_bars[idx]['value'] = proximity_value
                 
                 # Determine color zone based on actual distance (not proximity):
-                # Green (>=1200mm far) → Yellow (400-1199mm medium) → Red (<400mm close)
-                if distance_value >= 1200:
+                # Green (>=1000mm far) → Yellow (350-999mm medium) → Red (<350mm close)
+                if distance_value >= 1000:
                     self.tof_proximity_bars[idx].configure(style='ToF.green.Horizontal.TProgressbar')
-                elif distance_value >= 400:
+                elif distance_value >= 350:
                     self.tof_proximity_bars[idx].configure(style='ToF.yellow.Horizontal.TProgressbar')
                 else:
                     self.tof_proximity_bars[idx].configure(style='ToF.red.Horizontal.TProgressbar')

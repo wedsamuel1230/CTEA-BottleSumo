@@ -160,7 +160,9 @@ namespace Config {
   constexpr uint32_t I2C_FAST_MODE_HZ = 400000;
 
   // Thresholds & limits
-  constexpr float EDGE_THRESHOLD_VOLTS = 2.5f;
+  constexpr float EDGE_THRESHOLD_VOLTS_DEFAULT = 2.5f;  // Default threshold (used at startup)
+  constexpr float EDGE_THRESHOLD_VOLTS_MIN = 0.1f;      // Minimum valid threshold
+  constexpr float EDGE_THRESHOLD_VOLTS_MAX = 4.0f;      // Maximum valid threshold
   constexpr int DANGER_LEVEL_EMERGENCY_THRESHOLD = 2;
   constexpr int DANGER_LEVEL_RETREAT_THRESHOLD = 1;
   constexpr int MAX_STREAMING_CLIENTS = 6;
@@ -245,6 +247,10 @@ volatile struct SharedSensorData {
 // 互斥鎖 (Mutex) 用於數據同步
 mutex_t data_mutex;    // Protects shared_data structure
 mutex_t wire1_mutex;   // Protects Wire1 I2C bus hardware (OLED + ToF sensors)
+mutex_t threshold_mutex;  // Protects runtime_edge_threshold (Core 0 writes, Core 1 reads)
+
+// Runtime configuration (can be changed via TCP commands)
+volatile float runtime_edge_threshold = Config::EDGE_THRESHOLD_VOLTS_DEFAULT;
 
 // 核心狀態監控
 volatile bool core1_active = false;
@@ -301,7 +307,7 @@ struct QRE_AllSensors {
   }
   
   // Bottle Sumo 專用：檢測邊緣/白線（高電壓 = 反射 = 白色/邊緣）
-  bool isEdgeDetected(float edge_threshold = Config::EDGE_THRESHOLD_VOLTS) {
+  bool isEdgeDetected(float edge_threshold = Config::EDGE_THRESHOLD_VOLTS_DEFAULT) {
     for (int i = 0; i < Config::IR_SENSOR_COUNT; i++) {
       if (sensor[i].voltage > edge_threshold) {
         return true;  // 檢測到邊緣/白線
@@ -311,7 +317,7 @@ struct QRE_AllSensors {
   }
   
   // Bottle Sumo 專用：獲取邊緣方向
-  String getEdgeDirection(float edge_threshold = Config::EDGE_THRESHOLD_VOLTS) {
+  String getEdgeDirection(float edge_threshold = Config::EDGE_THRESHOLD_VOLTS_DEFAULT) {
   bool front_left = sensor[0].voltage > edge_threshold;   // 感測器 0: 前左
   bool front_right = sensor[1].voltage > edge_threshold;  // 感測器 1: 前右
   bool back_left = sensor[2].voltage > edge_threshold;    // 感測器 2: 後左
@@ -329,7 +335,7 @@ struct QRE_AllSensors {
   }
   
   // Bottle Sumo 專用：獲取危險等級（0=安全，4=最危險）
-  int getDangerLevel(float edge_threshold = Config::EDGE_THRESHOLD_VOLTS) {
+  int getDangerLevel(float edge_threshold = Config::EDGE_THRESHOLD_VOLTS_DEFAULT) {
     int danger_count = 0;
     for (int i = 0; i < Config::IR_SENSOR_COUNT; i++) {
       if (sensor[i].voltage > edge_threshold) {
@@ -407,6 +413,30 @@ Adafruit_ADS1115 ads;  // ADS1115 ADC 物件
 Adafruit_VL53L0X lox1, lox2, lox3;  // ToF sensors: lox1=RIGHT, lox2=FRONT, lox3=LEFT
 bool tofSensorInitialized[Config::TOF_SENSOR_COUNT] = {false};
 volatile bool tofSystemOnline = false;
+
+// ========== Runtime Threshold Access (Thread-Safe) ==========
+
+// Get current runtime threshold (thread-safe, used by Core 1)
+float getRuntimeThreshold() {
+  mutex_enter_blocking(&threshold_mutex);
+  float value = runtime_edge_threshold;
+  mutex_exit(&threshold_mutex);
+  return value;
+}
+
+// Set runtime threshold (thread-safe, used by Core 0 TCP command handler)
+// Returns true if value was valid and set, false if out of range
+bool setRuntimeThreshold(float new_value) {
+  if (new_value < Config::EDGE_THRESHOLD_VOLTS_MIN || new_value > Config::EDGE_THRESHOLD_VOLTS_MAX) {
+    return false;  // Out of valid range
+  }
+  mutex_enter_blocking(&threshold_mutex);
+  runtime_edge_threshold = new_value;
+  mutex_exit(&threshold_mutex);
+  return true;
+}
+
+// ========== Helper Functions ==========
 
 // Initialize Wire1 I2C bus for OLED and ToF sensors
 // MUST be called ONCE before any Wire1 devices are initialized
@@ -495,6 +525,7 @@ void setup() {
   // Initialize mutexes
   mutex_init(&data_mutex);     // For shared data protection
   mutex_init(&wire1_mutex);    // For Wire1 I2C bus protection (OLED + ToF)
+  mutex_init(&threshold_mutex); // For runtime threshold protection (Core 0 writes, Core 1 reads)
   
   // CRITICAL: Initialize Wire1 I2C bus FIRST, before ANY Wire1 devices
   // This bus is shared by OLED (0x3C) and ToF sensors (0x30/0x31/0x32)
@@ -866,6 +897,84 @@ void checkWiFiConnection() {
   }
 }
 
+// ========== TCP 命令處理 (Command Parser) ==========
+
+// Parse and execute client command (non-blocking)
+void handleClientCommand(WiFiClient &client, int clientSlot) {
+  static String commandBuffer[MAX_STREAMING_CLIENTS];  // Per-client command buffers
+  
+  // Read available data into buffer (non-blocking)
+  while (client.available()) {
+    char c = client.read();
+    
+    // Check for newline (command terminator)
+    if (c == '\n') {
+      String command = commandBuffer[clientSlot];
+      commandBuffer[clientSlot] = "";  // Clear buffer
+      
+      // Skip empty commands
+      if (command.length() == 0) continue;
+      
+      Serial.printf("📥 [插槽%d] 收到命令: %s\n", clientSlot, command.c_str());
+      
+      // Parse JSON command
+      // Expected format: {"cmd":"set_threshold","value":2.5}
+      int cmdStart = command.indexOf("\"cmd\":\"");
+      int valueStart = command.indexOf("\"value\":");
+      
+      if (cmdStart != -1 && valueStart != -1) {
+        // Extract command type
+        cmdStart += 7;  // Skip "cmd":"
+        int cmdEnd = command.indexOf("\"", cmdStart);
+        String cmdType = command.substring(cmdStart, cmdEnd);
+        
+        // Extract value
+        valueStart += 8;  // Skip "value":
+        int valueEnd = command.indexOf(",", valueStart);
+        if (valueEnd == -1) valueEnd = command.indexOf("}", valueStart);
+        String valueStr = command.substring(valueStart, valueEnd);
+        valueStr.trim();
+        float value = valueStr.toFloat();
+        
+        // Execute command
+        if (cmdType == "set_threshold") {
+          if (setRuntimeThreshold(value)) {
+            // Success - send acknowledgment
+            String ack = "{\"ack\":\"set_threshold\",\"value\":" + String(value, 2) + ",\"status\":\"ok\"}\n";
+            client.print(ack);
+            Serial.printf("✅ 閾值已更新: %.2fV\n", value);
+          } else {
+            // Invalid range - send error
+            String error = "{\"ack\":\"set_threshold\",\"error\":\"invalid_range\",\"min\":";
+            error += String(Config::EDGE_THRESHOLD_VOLTS_MIN, 1) + ",\"max\":";
+            error += String(Config::EDGE_THRESHOLD_VOLTS_MAX, 1) + "}\n";
+            client.print(error);
+            Serial.printf("❌ 無效閾值: %.2fV (範圍: %.1f-%.1fV)\n", value, 
+                         Config::EDGE_THRESHOLD_VOLTS_MIN, Config::EDGE_THRESHOLD_VOLTS_MAX);
+          }
+        } else {
+          // Unknown command
+          String error = "{\"error\":\"unknown_command\",\"cmd\":\"" + cmdType + "\"}\n";
+          client.print(error);
+          Serial.printf("❌ 未知命令: %s\n", cmdType.c_str());
+        }
+      } else {
+        // Malformed JSON
+        String error = "{\"error\":\"malformed_json\"}\n";
+        client.print(error);
+        Serial.println("❌ JSON 格式錯誤");
+      }
+      
+      break;  // Process one command per cycle
+    } else {
+      // Accumulate command in buffer (limit to 128 chars to prevent overflow)
+      if (commandBuffer[clientSlot].length() < 128) {
+        commandBuffer[clientSlot] += c;
+      }
+    }
+  }
+}
+
 // 處理 TCP 串流客戶端連接管理
 void handleStreamingClients(QRE_AllSensors &sensors) {
   // 第1步: 檢查新的客戶端連接 (完全非阻塞)
@@ -922,6 +1031,11 @@ void handleStreamingClients(QRE_AllSensors &sensors) {
       streamClients[i].isStreaming = false;
       client.stop();
       continue;
+    }
+    
+    // 第3步: 檢查並處理客戶端發送的命令 (非阻塞)
+    if (client.available()) {
+      handleClientCommand(client, i);
     }
     
     // 檢查客戶端超時 (5分鐘無活動)
@@ -993,11 +1107,12 @@ void sendRealTimeStreamToAllClients(QRE_AllSensors &sensors, ToFReadings &tofRea
   streamData += buildTofSensorStreamPayload(tofReadings) + ",";
 
   // 機器人狀態
+  float currentThreshold = getRuntimeThreshold();
   streamData += "\"robot_state\":{";
   streamData += "\"action\":\"" + actionString + "\",";
-  streamData += "\"edge_detected\":" + String(sensors.isEdgeDetected() ? "true" : "false") + ",";
-  streamData += "\"edge_direction\":\"" + sensors.getEdgeDirection() + "\",";
-  streamData += "\"danger_level\":" + String(sensors.getDangerLevel());
+  streamData += "\"edge_detected\":" + String(sensors.isEdgeDetected(currentThreshold) ? "true" : "false") + ",";
+  streamData += "\"edge_direction\":\"" + sensors.getEdgeDirection(currentThreshold) + "\",";
+  streamData += "\"danger_level\":" + String(sensors.getDangerLevel(currentThreshold));
   streamData += "},";
 
   // 系統資訊
@@ -1145,7 +1260,7 @@ void updateOLEDDisplay(QRE_AllSensors &sensors, ToFReadings &tofReadings) {
   
   // 感測器狀態 (以兩行呈現，保持可讀性)
   static const char* SENSOR_LABELS[Config::IR_SENSOR_COUNT] = {"FL", "FR", "RL", "RR"};
-  const float edgeThreshold = Config::EDGE_THRESHOLD_VOLTS;
+  const float edgeThreshold = Config::EDGE_THRESHOLD_VOLTS_DEFAULT;
   for (int row = 0; row < 2; ++row) {
     display.setCursor(0, 32 + row * 8);
     for (int col = 0; col < 2; ++col) {
@@ -1275,7 +1390,7 @@ ToFReadings getToFReadingsFromShared() {
 
 // 根據感測器狀態決定 Sumo 行動
 SumoAction decideSumoAction(QRE_AllSensors &sensors) {
-  const float EDGE_THRESHOLD = 2.5;  // 邊緣檢測閾值
+  const float EDGE_THRESHOLD = getRuntimeThreshold();  // 使用運行時閾值
   
   int danger_level = sensors.getDangerLevel(EDGE_THRESHOLD);
   
