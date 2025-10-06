@@ -32,7 +32,7 @@
 
 #include <Adafruit_ADS1X15.h>
 #include <Wire.h>
-#include <VL53L1X.h>
+#include <VL53L0X.h>
 
 // Include our snapshot architecture components
 #include "src/sensor_shared.cpp"
