@@ -38,7 +38,9 @@ int client_count = 0;
 // Simulated ToF sensor data (placeholder until sensors connected)
 struct ToF_Data {
   uint16_t right_distance = 0;
+  uint16_t right_22_5_distance = 0;  // Right 22.5° angle
   uint16_t front_distance = 0;
+  uint16_t left_22_5_distance = 0;   // Left 22.5° angle
   uint16_t left_distance = 0;
   bool sensors_connected = false;
 } tof_data;
@@ -98,20 +100,26 @@ void updateOLEDDisplay() {
     display.print(F("ToF Sensors:"));
     
     if (tof_data.sensors_connected) {
-      // Show actual sensor data
+      // Show actual sensor data - 5 sensors
       display.setCursor(0, 40);
       display.print(F("R:"));
       display.print(tof_data.right_distance);
-      display.print(F(" F:"));
+      display.print(F(" R2:"));
+      display.print(tof_data.right_22_5_distance);
+      
+      display.setCursor(0, 49);
+      display.print(F("F:"));
       display.print(tof_data.front_distance);
+      display.print(F(" L2:"));
+      display.print(tof_data.left_22_5_distance);
       display.print(F(" L:"));
-      display.println(tof_data.left_distance);
+      display.print(tof_data.left_distance);
     } else {
       // Show "Not Connected"
       display.setCursor(0, 40);
       display.println(F("Status: Waiting..."));
       display.setCursor(0, 49);
-      display.print(F("R:--- F:--- L:---"));
+      display.print(F("R:- R2:- F:- L2:- L:-"));
     }
     
     // Status bar at bottom
@@ -190,7 +198,9 @@ void setupWebServer() {
     html += "function updateData(){";
     html += "  fetch('/data').then(r=>r.json()).then(d=>{";
     html += "    document.getElementById('right-val').textContent=d.sensors_connected?d.right+'mm':'---';";
+    html += "    document.getElementById('right22-val').textContent=d.sensors_connected?d.right_22_5+'mm':'---';";
     html += "    document.getElementById('front-val').textContent=d.sensors_connected?d.front+'mm':'---';";
+    html += "    document.getElementById('left22-val').textContent=d.sensors_connected?d.left_22_5+'mm':'---';";
     html += "    document.getElementById('left-val').textContent=d.sensors_connected?d.left+'mm':'---';";
     html += "    document.getElementById('sensor-status').textContent=d.sensors_connected?'Connected':'Waiting...';";
     html += "    document.getElementById('sensor-status').className=d.sensors_connected?'success':'waiting';";
@@ -210,12 +220,14 @@ void setupWebServer() {
     html += "<div class='info'><strong>SSID:</strong> " + String(ap_ssid) + "</div>";
     html += "<div class='info'><strong>IP:</strong> " + ap_ip.toString() + "</div>";
     html += "<div class='sensor-box'>";
-    html += "<h3 style='margin-top:0;'>ToF Sensors</h3>";
+    html += "<h3 style='margin-top:0;'>ToF Sensors (5 sensors)</h3>";
     html += "<div id='sensor-status' class='waiting'>Waiting...</div>";
     html += "<div style='margin-top:15px;'>";
-    html += "<div class='sensor-data'><div class='sensor-label'>RIGHT</div><div id='right-val' class='sensor-value'>---</div></div>";
-    html += "<div class='sensor-data'><div class='sensor-label'>FRONT</div><div id='front-val' class='sensor-value'>---</div></div>";
-    html += "<div class='sensor-data'><div class='sensor-label'>LEFT</div><div id='left-val' class='sensor-value'>---</div></div>";
+    html += "<div class='sensor-data'><div class='sensor-label'>RIGHT 90°</div><div id='right-val' class='sensor-value'>---</div></div>";
+    html += "<div class='sensor-data'><div class='sensor-label'>RIGHT 22.5°</div><div id='right22-val' class='sensor-value'>---</div></div>";
+    html += "<div class='sensor-data'><div class='sensor-label'>FRONT 0°</div><div id='front-val' class='sensor-value'>---</div></div>";
+    html += "<div class='sensor-data'><div class='sensor-label'>LEFT 22.5°</div><div id='left22-val' class='sensor-value'>---</div></div>";
+    html += "<div class='sensor-data'><div class='sensor-label'>LEFT 90°</div><div id='left-val' class='sensor-value'>---</div></div>";
     html += "</div></div>";
     html += "<div class='info'><strong>Clients:</strong> <span id='clients'>" + String(WiFi.softAPgetStationNum()) + "</span></div>";
     html += "<div class='info'><strong>Uptime:</strong> <span id='uptime'>" + String(millis()/1000) + "</span>s</div>";
@@ -233,7 +245,9 @@ void setupWebServer() {
   server.on("/data", HTTP_GET, []() {
     String json = "{";
     json += "\"right\":" + String(tof_data.right_distance) + ",";
+    json += "\"right_22_5\":" + String(tof_data.right_22_5_distance) + ",";
     json += "\"front\":" + String(tof_data.front_distance) + ",";
+    json += "\"left_22_5\":" + String(tof_data.left_22_5_distance) + ",";
     json += "\"left\":" + String(tof_data.left_distance) + ",";
     json += "\"sensors_connected\":" + String(tof_data.sensors_connected ? "true" : "false") + ",";
     json += "\"clients\":" + String(WiFi.softAPgetStationNum()) + ",";
