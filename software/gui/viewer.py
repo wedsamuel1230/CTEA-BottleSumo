@@ -163,11 +163,16 @@ class BottleSumoViewer(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Bottle Sumo Real-Time Viewer")
-        self.geometry("650x850")  # Increased height for threshold config UI
-        self.minsize(600, 750)
+        self.geometry("650x1000")  # Increased height for motor control + threshold config UI
+        self.minsize(600, 850)
 
         self._reader_thread: Optional[TelemetryReader] = None
         self._queue: "queue.Queue[TelemetryPacket | Exception]" = queue.Queue()
+
+        # Motor control variables
+        self.motor1_var = tk.IntVar(value=0)  # Motor 1 PWM (-255 to +255)
+        self.motor2_var = tk.IntVar(value=0)  # Motor 2 PWM (-255 to +255)
+        self.motor_enabled_var = tk.BooleanVar(value=False)  # Enable/disable transmission
 
         # Variables for window dragging
         self._drag_start_x = 0
@@ -275,9 +280,35 @@ class BottleSumoViewer(tk.Tk):
             self.sensor_voltage_bars.append(voltage_canvas)  # Now stores Canvas instead of Progressbar
             self.sensor_threshold_markers.append(voltage_canvas)  # Same Canvas for both bar and threshold
 
+        # Motor Control ---------------------------------------------------
+        motor_frame = ttk.LabelFrame(root, text="Motor Control", padding=8)
+        motor_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        motor_frame.columnconfigure(1, weight=1)
+
+        # Motor 1 slider
+        ttk.Label(motor_frame, text="Motor 1 PWM:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.motor1_scale = tk.Scale(motor_frame, from_=-255, to=255, orient=tk.HORIZONTAL, variable=self.motor1_var, length=200, resolution=5, command=self._on_motor_slider_change, showvalue=0)
+        self.motor1_scale.grid(row=0, column=1, sticky="ew", padx=5)
+        self.motor1_value_label = ttk.Label(motor_frame, textvariable=self.motor1_var)
+        self.motor1_value_label.grid(row=0, column=2, sticky="w", padx=5)
+
+        # Motor 2 slider
+        ttk.Label(motor_frame, text="Motor 2 PWM:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.motor2_scale = tk.Scale(motor_frame, from_=-255, to=255, orient=tk.HORIZONTAL, variable=self.motor2_var, length=200, resolution=5, command=self._on_motor_slider_change, showvalue=0)
+        self.motor2_scale.grid(row=1, column=1, sticky="ew", padx=5)
+        self.motor2_value_label = ttk.Label(motor_frame, textvariable=self.motor2_var)
+        self.motor2_value_label.grid(row=1, column=2, sticky="w", padx=5)
+
+        # Enable transmission checkbox and status
+        self.motor_enable_check = ttk.Checkbutton(motor_frame, text="Enable Transmission", variable=self.motor_enabled_var)
+        self.motor_enable_check.grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=5)
+        
+        self.motor_status_var = tk.StringVar(value="Idle")
+        ttk.Label(motor_frame, text="Status:").grid(row=2, column=2, sticky="e", padx=5)
+
         # Threshold Configuration ---------------------------------------------------
         threshold_frame = ttk.LabelFrame(root, text="Threshold Configuration", padding=8)
-        threshold_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        threshold_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         threshold_frame.columnconfigure(1, weight=1)
         
         # IR Edge Thresholds (one per sensor, user configurable)
@@ -300,7 +331,7 @@ class BottleSumoViewer(tk.Tk):
         
         # ToF Sensors data ---------------------------------------------------
         tof_frame = ttk.LabelFrame(root, text="ToF Sensors (VL53L0X)", padding=8)
-        tof_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        tof_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         tof_frame.columnconfigure(3, weight=1)  # Make proximity bar column expandable
 
         ttk.Label(tof_frame, text="Direction").grid(row=0, column=0, padx=4, sticky="w")
@@ -335,7 +366,7 @@ class BottleSumoViewer(tk.Tk):
 
         # Robot state --------------------------------------------------------
         state_frame = ttk.LabelFrame(root, text="Robot State", padding=8)
-        state_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        state_frame.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         state_frame.columnconfigure(1, weight=1)
 
         self.action_var = tk.StringVar(value="-")
@@ -356,7 +387,7 @@ class BottleSumoViewer(tk.Tk):
 
         # System info --------------------------------------------------------
         system_frame = ttk.LabelFrame(root, text="System Info", padding=8)
-        system_frame.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        system_frame.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         system_frame.columnconfigure(1, weight=1)
 
         self.timestamp_var = tk.StringVar(value="-")
@@ -382,7 +413,7 @@ class BottleSumoViewer(tk.Tk):
         # Status bar ---------------------------------------------------------
         self.status_var = tk.StringVar(value="Idle")
         status_bar = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, anchor="w")
-        status_bar.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        status_bar.grid(row=7, column=0, sticky="ew", pady=(10, 0))
 
         root.rowconfigure(1, weight=1)
         
@@ -600,15 +631,27 @@ class BottleSumoViewer(tk.Tk):
         
     def _start_drag(self, event) -> None:
         """Record the starting position for window drag."""
+        # Ignore events from interactive widgets (Scale, Entry, Scrollbar, Button, Checkbutton, etc.)
+        widget_class = event.widget.winfo_class()
+        if widget_class in ('Scale', 'Entry', 'TEntry', 'Scrollbar', 'TScrollbar', 'Button', 'TButton', 'Checkbutton', 'TCheckbutton', 'Spinbox', 'TSpinbox'):
+            return
+        
         self._drag_start_x = event.x
         self._drag_start_y = event.y
         
     def _on_drag(self, event) -> None:
         """Move the window as the mouse is dragged."""
+        # Ignore events from interactive widgets
+        widget_class = event.widget.winfo_class()
+        if widget_class in ('Scale', 'Entry', 'TEntry', 'Scrollbar', 'TScrollbar', 'Button', 'TButton', 'Checkbutton', 'TCheckbutton', 'Spinbox', 'TSpinbox'):
+            return
+        
         x = self.winfo_x() + (event.x - self._drag_start_x)
         y = self.winfo_y() + (event.y - self._drag_start_y)
         self.geometry(f"+{x}+{y}")
 
+    # ------------------------------------------------------------------
+    # Connection handling
     # ------------------------------------------------------------------
     # Connection handling
     # ------------------------------------------------------------------
@@ -637,6 +680,47 @@ class BottleSumoViewer(tk.Tk):
             self.status_var.set("Disconnecting…")
             self._reader_thread.stop()
             self._reader_thread.join(timeout=2.0)
+            self._reader_thread = None
+        self.connect_button.config(text="Connect")
+        self.status_var.set("Disconnected")
+
+    # ------------------------------------------------------------------
+    # Motor control
+    # ------------------------------------------------------------------
+    def _on_motor_slider_change(self, value=None) -> None:
+        """Called when motor sliders are adjusted. Sends motor command if enabled."""
+        # Only send if transmission is enabled and connected
+        if not self.motor_enabled_var.get():
+            return
+        
+        if not self._reader_thread or not self._reader_thread.is_alive():
+            self.motor_status_var.set("⚠️ Not connected")
+            return
+        
+        self._send_motor_command()
+    
+    def _send_motor_command(self) -> None:
+        """Send motor control command via existing telemetry socket."""
+        try:
+            motor1_value = self.motor1_var.get()
+            motor2_value = self.motor2_var.get()
+            
+            # Build JSON command for direct motor control
+            command = {"motor1": motor1_value, "motor2": motor2_value}
+            command_str = json.dumps(command) + "\n"
+            
+            # Send via telemetry socket (if available)
+            if hasattr(self._reader_thread, '_sock') and self._reader_thread._sock:
+                self._reader_thread._sock.sendall(command_str.encode('utf-8'))
+                self.motor_status_var.set(f"📤 M1:{motor1_value} M2:{motor2_value}")
+            else:
+                self.motor_status_var.set("❌ Socket not available")
+        except Exception as exc:
+            self.motor_status_var.set(f"❌ Send error: {exc}")
+
+    # ------------------------------------------------------------------
+    # Queue processing and UI updates
+    # ------------------------------------------------------------------
             self._reader_thread = None
         self.connect_button.config(text="Connect")
         self.status_var.set("Disconnected")

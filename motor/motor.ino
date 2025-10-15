@@ -7,7 +7,7 @@ const char* ssid = "BottleSumo_AP";
 const char* password = "12345678";  // Must be at least 8 characters
 
 // TCP Server
-WiFiServer server(8080);
+WiFiServer server(4242);
 WiFiClient client;
 
 Motor motor1(11, 12);  // GPIO 11 left motor
