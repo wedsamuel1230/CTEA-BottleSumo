@@ -81,6 +81,7 @@
  * 
  * 作者: CTEA-BottleSumo 專案 - 即時串流版本
  * 日期: 2025-09-25
+ * 更新: 2025-10-15 - 添加測試模式 (Motor + Sensor Testing)
  */
 
 #include <Adafruit_ADS1X15.h>
@@ -89,6 +90,12 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_VL53L0X.h>
 #include <WiFi.h>
+
+// Test Mode Modules (modular, portable to TimeSliced version)
+#include "Motor.h"
+#include "TestModeCommon.h"
+#include "MotorTestMode.h"
+#include "SensorTestMode.h"
 
 // ToF Sensor Hardware Configuration
 constexpr uint8_t TOF_XSHUT_1 = 12;                   // GP11 - Right sensor shutdown pin
@@ -99,10 +106,10 @@ constexpr uint8_t TOF_FRONT_ADDRESS = 0x31;           // Front sensor I2C addres
 constexpr uint8_t TOF_LEFT_ADDRESS = 0x32;            // Left sensor I2C address
 
 // ToF Sensor Timing Configuration
-constexpr unsigned long TOF_TIMING_BUDGET_US = 35000; // 30ms per reading for BALANCED mode (long-range accuracy)
+constexpr unsigned long TOF_TIMING_BUDGET_US = 50000; // 50ms per reading for LONG-RANGE mode (stable accuracy)
 constexpr uint8_t TOF_VCSEL_PRE_RANGE = 14;           // Pre-range pulse period (balanced range/speed)
 constexpr uint8_t TOF_VCSEL_FINAL_RANGE = 10;         // Final-range pulse period (balanced range/speed)
-constexpr unsigned long TOF_LOOP_DELAY_MS = 115;      // 100ms = 90ms read (3×30ms) + 10ms margin (~10Hz)
+constexpr unsigned long TOF_LOOP_DELAY_MS = 165;      // 165ms = 150ms read (3×50ms) + 15ms margin (~6Hz)
 constexpr unsigned long TOF_RESET_DELAY_MS = 50;      // Full reset delay
 constexpr unsigned long TOF_POST_RESET_DELAY_MS = 20; // Post-reset sensor startup delay (minimal)
 
@@ -134,6 +141,13 @@ namespace Config {
   constexpr uint8_t TOF_INDEX_RIGHT = 0;
   constexpr uint8_t TOF_INDEX_FRONT = 1;
   constexpr uint8_t TOF_INDEX_LEFT = 2;
+
+  // Motor configuration
+  constexpr uint8_t MOTOR_LEFT_PWM_PIN = 11;    // GP11 - Left motor PWM
+  constexpr uint8_t MOTOR_LEFT_DIR_PIN = 12;    // GP12 - Left motor direction
+  constexpr uint8_t MOTOR_RIGHT_PWM_PIN = 20;   // GP20 - Right motor PWM
+  constexpr uint8_t MOTOR_RIGHT_DIR_PIN = 19;   // GP19 - Right motor direction
+  constexpr uint32_t MOTOR_PWM_FREQ_HZ = 20000; // 20 kHz PWM frequency
 
   // Timing configuration (milliseconds unless noted)
   constexpr unsigned long OLED_UPDATE_INTERVAL_MS = 200;    // 5 Hz
@@ -424,6 +438,16 @@ Adafruit_VL53L0X lox1, lox2, lox3;  // ToF sensors: lox1=RIGHT, lox2=FRONT, lox3
 bool tofSensorInitialized[Config::TOF_SENSOR_COUNT] = {false};
 volatile bool tofSystemOnline = false;
 
+// ========== Motor Objects (Test Mode) ==========
+
+Motor motorLeft(Config::MOTOR_LEFT_PWM_PIN, Config::MOTOR_LEFT_DIR_PIN);
+Motor motorRight(Config::MOTOR_RIGHT_PWM_PIN, Config::MOTOR_RIGHT_DIR_PIN);
+
+// ========== Test Mode State ==========
+
+TestModeState g_testModeState;  // Global test mode state (modular, easy to extract)
+
+
 // ========== Runtime Threshold Access (Thread-Safe) ==========
 
 // Get current runtime threshold for a specific sensor (thread-safe, used by Core 1)
@@ -579,6 +603,14 @@ void setup() {
     delay(Config::CORE1_WAIT_POLL_DELAY_MS);
   }
   Serial.println("✓ Core 1 Sensor Initialization Complete");
+  
+  // Initialize motors (test mode)
+  Serial.println("Initializing Motor Controllers...");
+  motorLeft.begin(Config::MOTOR_PWM_FREQ_HZ);
+  motorRight.begin(Config::MOTOR_PWM_FREQ_HZ);
+  motorLeft.stop();   // Start in safe state
+  motorRight.stop();
+  Serial.println("✓ Motor Controllers Ready (Test Mode: DISABLED)");
   
   // NOW initialize WiFi after sensors are ready
   Serial.println("Initializing WiFi Real-Time Streaming Server...");
@@ -1030,7 +1062,64 @@ void handleClientCommand(WiFiClient &client, int clientSlot) {
             Serial.printf("❌ 無效閾值: %.2fV (範圍: %.1f-%.1fV)\n", value, 
                          Config::EDGE_THRESHOLD_VOLTS_MIN, Config::EDGE_THRESHOLD_VOLTS_MAX);
           }
-        } else {
+        }
+        // ========== TEST MODE COMMANDS ==========
+        else if (cmdType == "set_mode") {
+          // SET_MODE <mode_name>  (e.g., SET_MODE AUTO, SET_MODE TEST_MOTOR)
+          // Extract mode name from the command buffer (after "set_mode")
+          int modeStart = command.indexOf("set_mode") + 8;
+          String modeName = command.substring(modeStart);
+          modeName.trim();
+          modeName.toUpperCase();
+          
+          TestMode newMode = TestModeUtils::parseModeString(modeName);
+          if (newMode != TestMode::AUTO || modeName == "AUTO") {
+            g_testModeState.mode = newMode;
+            String response = "{\"ack\":\"set_mode\",\"mode\":\"" , TestModeUtils::getModeString(newMode) , "\",\"status\":\"ok\"}\n";
+            client.print(response);
+            Serial.printf("✅ 模式已切換: %s\n", TestModeUtils::getModeString(newMode).c_str());
+          } else {
+            String error = "{\"error\":\"invalid_mode\",\"requested\":\"" + modeName + "\"}\n";
+            client.print(error);
+            Serial.printf("❌ 無效模式: %s\n", modeName.c_str());
+          }
+        }
+        else if (cmdType == "test_motor") {
+          // TEST_MOTOR <left_pwm> <right_pwm>  (e.g., TEST_MOTOR 50 -30)
+          String response = MotorTestMode::handleTestMotorCommand(command, g_testModeState, motorLeft, motorRight);
+          client.print(response);
+        }
+        else if (cmdType == "stop_motor") {
+          // STOP_MOTOR
+          String response = MotorTestMode::handleStopMotorCommand(g_testModeState, motorLeft, motorRight);
+          client.print(response);
+        }
+        else if (cmdType == "get_motor") {
+          // GET_MOTOR
+          String response = MotorTestMode::handleGetMotorCommand(g_testModeState);
+          client.print(response);
+        }
+        else if (cmdType == "test_sensor") {
+          // TEST_SENSOR <sensor_type> <sensor_id>  (e.g., TEST_SENSOR IR 0, TEST_SENSOR TOF 2)
+          String response = SensorTestMode::handleTestSensorCommand(command, g_testModeState);
+          client.print(response);
+        }
+        else if (cmdType == "calibrate_ir") {
+          // CALIBRATE_IR <START|STOP>
+          String response = SensorTestMode::handleCalibrateIRCommand(command, g_testModeState);
+          client.print(response);
+        }
+        else if (cmdType == "calibrate_tof") {
+          // CALIBRATE_TOF <START|STOP>
+          String response = SensorTestMode::handleCalibrateToFCommand(command, g_testModeState);
+          client.print(response);
+        }
+        else if (cmdType == "get_calibration") {
+          // GET_CALIBRATION
+          String response = SensorTestMode::handleGetCalibrationCommand(g_testModeState);
+          client.print(response);
+        }
+        else {
           // Unknown command
           String error = "{\"error\":\"unknown_command\",\"cmd\":\"" + cmdType + "\"}\n";
           client.print(error);
@@ -1643,10 +1732,26 @@ void loop() {
   // WiFi 狀態監控和 TCP 即時串流處理
   handleWiFiAndRealTimeStreaming(all_sensors, tofReadings);
   
-  // 馬達控制邏輯在這裡執行
-  // TODO: 添加您的馬達控制代碼
+  // ========== TEST MODE EXECUTION ==========
+  // Execute test mode motor control
+  if (g_testModeState.mode == TestMode::TEST_MOTOR) {
+    MotorTestMode::executeTestMode(g_testModeState, motorLeft, motorRight);
+  }
   
-  // 適當的延遲，讓 Core 0 以適合馬達控制的頻率運行 (例如 100Hz)
+  // Update sensor calibration if active
+  if (g_testModeState.calibration.isCalibrating) {
+    SensorTestMode::updateCalibration(g_testModeState, all_sensors, tofReadings);
+  }
+  
+  // Autonomous motor control (only when in AUTO mode and not calibrating)
+  if (g_testModeState.mode == TestMode::AUTO && !g_testModeState.calibration.isCalibrating) {
+    // TODO: Add your autonomous motor control code here
+    // Example: 
+    // SumoAction action = decideSumoAction(all_sensors);
+    // executeSumoAction(action, all_sensors);
+  }
+  
+  //適當的延遲，讓 Core 0 以適合馬達控制的頻率運行 (例如 100Hz)
   delay(10);  // 100Hz
 }
 

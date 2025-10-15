@@ -43,6 +43,10 @@ class TelemetryPacket:
     system_info: Dict[str, Any] = field(default_factory=dict)
     ir_edge_thresholds: list[float] = field(default_factory=lambda: [2.5, 2.5, 2.5, 2.5])  # Default IR edge detection thresholds (volts) for each sensor
     tof_detection_threshold: int = 1600  # Default ToF detection threshold (mm)
+    test_mode: str = "AUTO"  # Current test mode
+    motor_left: int = 0  # Left motor PWM
+    motor_right: int = 0  # Right motor PWM
+    motor_estop: bool = False  # Emergency stop status
 
     @classmethod
     def from_json(cls, payload: Dict[str, Any]) -> "TelemetryPacket":
@@ -65,6 +69,13 @@ class TelemetryPacket:
             # Legacy single threshold - replicate for all 4 sensors
             single_threshold = float(edge_threshold_data)
             ir_edge_thresholds = [single_threshold] * 4
+        
+        # Parse test mode and motor status
+        test_mode = payload.get("test_mode", "AUTO")
+        motors = payload.get("motors", {})
+        motor_left = motors.get("left", 0)
+        motor_right = motors.get("right", 0)
+        motor_estop = motors.get("estop", False)
 
         return cls(
             timestamp=payload.get("timestamp", 0),
@@ -78,6 +89,10 @@ class TelemetryPacket:
             system_info=dict(payload.get("system_info", {})),
             ir_edge_thresholds=ir_edge_thresholds,
             tof_detection_threshold=int(tofsensors.get("detection_threshold", 1600)),
+            test_mode=test_mode,
+            motor_left=motor_left,
+            motor_right=motor_right,
+            motor_estop=motor_estop,
         )
 
 
@@ -163,16 +178,19 @@ class BottleSumoViewer(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Bottle Sumo Real-Time Viewer")
-        self.geometry("650x1000")  # Increased height for motor control + threshold config UI
-        self.minsize(600, 850)
+        self.geometry("900x950")  # Wider for two-column layout
+        self.minsize(850, 900)
 
         self._reader_thread: Optional[TelemetryReader] = None
         self._queue: "queue.Queue[TelemetryPacket | Exception]" = queue.Queue()
 
         # Motor control variables
-        self.motor1_var = tk.IntVar(value=0)  # Motor 1 PWM (-255 to +255)
-        self.motor2_var = tk.IntVar(value=0)  # Motor 2 PWM (-255 to +255)
+        self.motor1_var = tk.IntVar(value=0)  # Motor 1 PWM (-100 to +100)
+        self.motor2_var = tk.IntVar(value=0)  # Motor 2 PWM (-100 to +100)
         self.motor_enabled_var = tk.BooleanVar(value=False)  # Enable/disable transmission
+        
+        # Test mode variables
+        self.test_mode_var = tk.StringVar(value="AUTO")  # Current test mode
 
         # Variables for window dragging
         self._drag_start_x = 0
@@ -219,10 +237,14 @@ class BottleSumoViewer(tk.Tk):
         root.grid(row=0, column=0, sticky="nsew")
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
+        
+        # Configure root grid for two-column layout
+        root.columnconfigure(0, weight=1)
+        root.columnconfigure(1, weight=1)
 
-        # Connection controls -------------------------------------------------
+        # Connection controls (LEFT SIDE) -------------------------------------
         connection_frame = ttk.LabelFrame(root, text="Connection", padding=8)
-        connection_frame.grid(row=0, column=0, sticky="ew")
+        connection_frame.grid(row=0, column=0, sticky="ew", padx=(0, 5))
         connection_frame.columnconfigure(1, weight=1)
 
         ttk.Label(connection_frame, text="Host:").grid(row=0, column=0, sticky="w")
@@ -236,9 +258,27 @@ class BottleSumoViewer(tk.Tk):
         self.connect_button = ttk.Button(connection_frame, text="Connect", command=self._toggle_connection)
         self.connect_button.grid(row=0, column=4, padx=(8, 0))
 
-        # Sensor data ---------------------------------------------------------
+        # Test Mode controls (RIGHT SIDE) -------------------------------------
+        test_mode_frame = ttk.LabelFrame(root, text="Test Mode", padding=8)
+        test_mode_frame.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+        test_mode_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(test_mode_frame, text="Mode:").grid(row=0, column=0, sticky="w", padx=5)
+        self.mode_selector = ttk.Combobox(test_mode_frame, textvariable=self.test_mode_var, 
+                                         values=["AUTO", "TEST_MOTOR", "TEST_SENSOR", "CALIBRATE_IR", "CALIBRATE_TOF"],
+                                         state="readonly", width=15)
+        self.mode_selector.grid(row=0, column=1, sticky="ew", padx=5)
+        self.mode_selector.bind("<<ComboboxSelected>>", self._on_mode_change)
+
+        self.mode_apply_button = ttk.Button(test_mode_frame, text="Apply Mode", command=self._apply_test_mode)
+        self.mode_apply_button.grid(row=0, column=2, padx=5)
+        
+        self.mode_status_var = tk.StringVar(value="Current: AUTO")
+        ttk.Label(test_mode_frame, textvariable=self.mode_status_var).grid(row=1, column=0, columnspan=3, sticky="w", padx=5, pady=(5, 0))
+
+        # Sensor data (LEFT SIDE) ---------------------------------------------
         sensors_frame = ttk.LabelFrame(root, text="Sensors", padding=8)
-        sensors_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        sensors_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0), padx=(0, 5))
         sensors_frame.columnconfigure(1, weight=1)
         sensors_frame.columnconfigure(3, weight=1)
 
@@ -280,21 +320,21 @@ class BottleSumoViewer(tk.Tk):
             self.sensor_voltage_bars.append(voltage_canvas)  # Now stores Canvas instead of Progressbar
             self.sensor_threshold_markers.append(voltage_canvas)  # Same Canvas for both bar and threshold
 
-        # Motor Control ---------------------------------------------------
+        # Motor Control (RIGHT SIDE) ------------------------------------------
         motor_frame = ttk.LabelFrame(root, text="Motor Control", padding=8)
-        motor_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        motor_frame.grid(row=1, column=1, sticky="nsew", pady=(10, 0), padx=(5, 0))
         motor_frame.columnconfigure(1, weight=1)
 
         # Motor 1 slider
         ttk.Label(motor_frame, text="Motor 1 PWM:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        self.motor1_scale = tk.Scale(motor_frame, from_=-255, to=255, orient=tk.HORIZONTAL, variable=self.motor1_var, length=200, resolution=5, command=self._on_motor_slider_change, showvalue=0)
+        self.motor1_scale = tk.Scale(motor_frame, from_=-100, to=100, orient=tk.HORIZONTAL, variable=self.motor1_var, length=200, resolution=5, command=self._on_motor_slider_change, showvalue=0)
         self.motor1_scale.grid(row=0, column=1, sticky="ew", padx=5)
         self.motor1_value_label = ttk.Label(motor_frame, textvariable=self.motor1_var)
         self.motor1_value_label.grid(row=0, column=2, sticky="w", padx=5)
 
         # Motor 2 slider
         ttk.Label(motor_frame, text="Motor 2 PWM:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
-        self.motor2_scale = tk.Scale(motor_frame, from_=-255, to=255, orient=tk.HORIZONTAL, variable=self.motor2_var, length=200, resolution=5, command=self._on_motor_slider_change, showvalue=0)
+        self.motor2_scale = tk.Scale(motor_frame, from_=-100, to=100, orient=tk.HORIZONTAL, variable=self.motor2_var, length=200, resolution=5, command=self._on_motor_slider_change, showvalue=0)
         self.motor2_scale.grid(row=1, column=1, sticky="ew", padx=5)
         self.motor2_value_label = ttk.Label(motor_frame, textvariable=self.motor2_var)
         self.motor2_value_label.grid(row=1, column=2, sticky="w", padx=5)
@@ -306,9 +346,9 @@ class BottleSumoViewer(tk.Tk):
         self.motor_status_var = tk.StringVar(value="Idle")
         ttk.Label(motor_frame, text="Status:").grid(row=2, column=2, sticky="e", padx=5)
 
-        # Threshold Configuration ---------------------------------------------------
+        # Threshold Configuration (FULL WIDTH) ----------------------------
         threshold_frame = ttk.LabelFrame(root, text="Threshold Configuration", padding=8)
-        threshold_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        threshold_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         threshold_frame.columnconfigure(1, weight=1)
         
         # IR Edge Thresholds (one per sensor, user configurable)
@@ -329,9 +369,9 @@ class BottleSumoViewer(tk.Tk):
         self.firmware_ir_threshold_var = tk.StringVar(value="-")
         ttk.Label(threshold_frame, textvariable=self.firmware_ir_threshold_var).grid(row=4, column=1, columnspan=2, sticky="w", padx=5)
         
-        # ToF Sensors data ---------------------------------------------------
+        # ToF Sensors data (FULL WIDTH) ---------------------------------------
         tof_frame = ttk.LabelFrame(root, text="ToF Sensors (VL53L0X)", padding=8)
-        tof_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        tof_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         tof_frame.columnconfigure(3, weight=1)  # Make proximity bar column expandable
 
         ttk.Label(tof_frame, text="Direction").grid(row=0, column=0, padx=4, sticky="w")
@@ -364,9 +404,9 @@ class BottleSumoViewer(tk.Tk):
         ttk.Label(tof_frame, text="Object Direction:").grid(row=4, column=0, sticky="w")
         ttk.Label(tof_frame, textvariable=self.tof_object_direction_var).grid(row=4, column=1, columnspan=2, sticky="w")
 
-        # Robot state --------------------------------------------------------
+        # Robot state (FULL WIDTH) --------------------------------------------
         state_frame = ttk.LabelFrame(root, text="Robot State", padding=8)
-        state_frame.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        state_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         state_frame.columnconfigure(1, weight=1)
 
         self.action_var = tk.StringVar(value="-")
@@ -385,9 +425,9 @@ class BottleSumoViewer(tk.Tk):
         ttk.Label(state_frame, text="Danger Level:").grid(row=3, column=0, sticky="w")
         ttk.Label(state_frame, textvariable=self.danger_level_var).grid(row=3, column=1, sticky="w")
 
-        # System info --------------------------------------------------------
+        # System info (FULL WIDTH) --------------------------------------------
         system_frame = ttk.LabelFrame(root, text="System Info", padding=8)
-        system_frame.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        system_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         system_frame.columnconfigure(1, weight=1)
 
         self.timestamp_var = tk.StringVar(value="-")
@@ -410,12 +450,12 @@ class BottleSumoViewer(tk.Tk):
         ttk.Label(system_frame, text="Free heap (bytes):").grid(row=4, column=0, sticky="w")
         ttk.Label(system_frame, textvariable=self.free_heap_var).grid(row=4, column=1, sticky="w")
 
-        # Status bar ---------------------------------------------------------
+        # Status bar (FULL WIDTH) ---------------------------------------------
         self.status_var = tk.StringVar(value="Idle")
         status_bar = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, anchor="w")
-        status_bar.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        status_bar.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
-        root.rowconfigure(1, weight=1)
+        root.rowconfigure(1, weight=1)  # Make sensors row expandable
         
         # Initialize threshold markers after UI is built
         self._update_threshold_markers()
@@ -653,7 +693,46 @@ class BottleSumoViewer(tk.Tk):
     # ------------------------------------------------------------------
     # Connection handling
     # ------------------------------------------------------------------
-    # Connection handling
+    def _toggle_connection(self) -> None:
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._disconnect()
+        else:
+            self._connect()
+    
+    def _on_mode_change(self, event=None) -> None:
+        """Handle test mode combobox selection change."""
+        pass  # Just update the UI variable, actual change happens on Apply button
+    
+    def _apply_test_mode(self) -> None:
+        """Apply the selected test mode by sending SET_MODE command to Arduino."""
+        if not self._reader_thread or not self._reader_thread.is_alive():
+            messagebox.showwarning("Not Connected", "Please connect to the robot first.")
+            return
+        
+        mode = self.test_mode_var.get()
+        try:
+            # Send SET_MODE command to Arduino
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2.0)
+            sock.connect((self.host_var.get(), self.port_var.get()))
+            command = f"SET_MODE {mode}\n"
+            sock.sendall(command.encode('utf-8'))
+            
+            # Wait for acknowledgment
+            response = sock.recv(256).decode('utf-8', errors='ignore')
+            sock.close()
+            
+            if "ack" in response.lower():
+                self.mode_status_var.set(f"Current: {mode}")
+                self.status_var.set(f"Test mode changed to {mode}")
+            else:
+                self.status_var.set(f"Mode change failed: {response}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to apply test mode:\n{e}")
+            self.status_var.set(f"Mode change error: {e}")
+
+    # ------------------------------------------------------------------
+    # Connection handling (continued)
     # ------------------------------------------------------------------
     def _toggle_connection(self) -> None:
         if self._reader_thread and self._reader_thread.is_alive():
@@ -700,23 +779,30 @@ class BottleSumoViewer(tk.Tk):
         self._send_motor_command()
     
     def _send_motor_command(self) -> None:
-        """Send motor control command via existing telemetry socket."""
+        """Send motor control command via TEST_MOTOR command to Arduino firmware."""
         try:
             motor1_value = self.motor1_var.get()
             motor2_value = self.motor2_var.get()
             
-            # Build JSON command for direct motor control
-            command = {"motor1": motor1_value, "motor2": motor2_value}
-            command_str = json.dumps(command) + "\n"
+            # Create a new socket connection for sending commands
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            sock.connect((self.host_var.get(), self.port_var.get()))
             
-            # Send via telemetry socket (if available)
-            if hasattr(self._reader_thread, '_sock') and self._reader_thread._sock:
-                self._reader_thread._sock.sendall(command_str.encode('utf-8'))
-                self.motor_status_var.set(f"📤 M1:{motor1_value} M2:{motor2_value}")
+            # Send TEST_MOTOR command (format: TEST_MOTOR <left> <right>)
+            command = f"TEST_MOTOR {motor1_value} {motor2_value}\n"
+            sock.sendall(command.encode('utf-8'))
+            
+            # Wait for acknowledgment
+            response = sock.recv(256).decode('utf-8', errors='ignore')
+            sock.close()
+            
+            if "OK" in response:
+                self.motor_status_var.set(f"✓ M1:{motor1_value} M2:{motor2_value}")
             else:
-                self.motor_status_var.set("❌ Socket not available")
+                self.motor_status_var.set(f"⚠️ {response.strip()}")
         except Exception as exc:
-            self.motor_status_var.set(f"❌ Send error: {exc}")
+            self.motor_status_var.set(f"❌ Error: {exc}")
 
     # ------------------------------------------------------------------
     # Queue processing and UI updates
@@ -870,6 +956,19 @@ class BottleSumoViewer(tk.Tk):
         self.core1_freq_var.set(str(packet.system_info.get("core1_freq", "-")))
         self.wifi_rssi_var.set(str(packet.system_info.get("wifi_rssi", "-")))
         self.free_heap_var.set(str(packet.system_info.get("free_heap", "-")))
+        
+        # Update test mode status from telemetry
+        if packet.test_mode:
+            self.mode_status_var.set(f"Current: {packet.test_mode}")
+            # Also update the dropdown to reflect current mode
+            if packet.test_mode in ["AUTO", "TEST_MOTOR", "TEST_SENSOR", "CALIBRATE_IR", "CALIBRATE_TOF"]:
+                self.test_mode_var.set(packet.test_mode)
+        
+        # Update motor status indicators
+        if packet.motor_estop:
+            self.motor_status_var.set(f"🛑 E-STOP | M1:{packet.motor_left} M2:{packet.motor_right}")
+        else:
+            self.motor_status_var.set(f"✓ Active | M1:{packet.motor_left} M2:{packet.motor_right}")
 
     # ------------------------------------------------------------------
     # Tkinter lifecycle hooks
