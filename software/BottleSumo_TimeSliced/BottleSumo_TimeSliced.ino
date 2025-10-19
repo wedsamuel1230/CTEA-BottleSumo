@@ -123,15 +123,32 @@ struct MotorCommand {
   unsigned long timestamp;
 };
 
-// Sumo robot state
+// Sumo robot state with directional edge detection
 enum SumoAction {
   SEARCH_OPPONENT,
   ATTACK_FORWARD,
-  RETREAT_AND_TURN,
-  EMERGENCY_REVERSE,
-  IDLE
+  
+  // Edge detection retreat actions (directional)
+  RETREAT_FORWARD,          // Both bottom sensors (A2+A3) - move forward away from rear edge
+  RETREAT_BACKWARD,         // Both top sensors (A0+A1) - move backward away from front edge
+  RETREAT_FORWARD_LEFT,     // Bottom-right sensor (A3) - diagonal retreat
+  RETREAT_FORWARD_RIGHT,    // Bottom-left sensor (A2) - diagonal retreat
+  RETREAT_BACKWARD_LEFT,    // Top-right sensor (A1) - diagonal retreat
+  RETREAT_BACKWARD_RIGHT,   // Top-left sensor (A0) - diagonal retreat
+  RETREAT_LEFT,             // Right side sensors (A1+A3) - strafe left
+  RETREAT_RIGHT,            // Left side sensors (A0+A2) - strafe right
+  
+  EMERGENCY_STOP,           // All sensors or critical failure
+  IDLE                      // Test mode or stopped
 };
-
+struct EdgeDetection {
+  uint8_t pattern;      // Bitfield of detected edges
+  uint8_t count;        // Number of edges detected
+  bool top_left;        // A0 - front-left corner
+  bool top_right;       // A1 - front-right corner
+  bool bottom_left;     // A2 - rear-left corner
+  bool bottom_right;    // A3 - rear-right corner
+};
 // ========== Global Objects & State ==========
 
 // Mutexes for thread safety
@@ -147,6 +164,10 @@ volatile float runtime_thresholds[IR_SENSOR_COUNT] = {
   EDGE_THRESHOLD_DEFAULT, EDGE_THRESHOLD_DEFAULT, 
   EDGE_THRESHOLD_DEFAULT, EDGE_THRESHOLD_DEFAULT
 };
+
+// Core 0 state tracking
+volatile SumoAction current_action = IDLE;
+EdgeDetection current_edges = {0, 0, false, false, false, false};
 
 // Core 1 objects
 Ads1115Sampler ads_sampler;
@@ -173,6 +194,52 @@ struct ClientState {
 ClientState clients[MAX_CLIENTS];
 
 // ========== Helper Functions ==========
+
+// Edge detection bitfield (for fast pattern matching)
+// Bit 0 = A0 (top-left), Bit 1 = A1 (top-right), Bit 2 = A2 (bottom-left), Bit 3 = A3 (bottom-right)
+
+
+// Analyze edge sensor pattern
+EdgeDetection analyzeEdges(const SensorData &sensors) {
+  EdgeDetection result = {0, 0, false, false, false, false};
+  
+  // Check each sensor against threshold
+  result.top_left = sensors.ir_volts[0] > getThreshold(0);      // A0
+  result.top_right = sensors.ir_volts[1] > getThreshold(1);     // A1
+  result.bottom_left = sensors.ir_volts[2] > getThreshold(2);   // A2
+  result.bottom_right = sensors.ir_volts[3] > getThreshold(3);  // A3
+  
+  // Build bitfield pattern
+  result.pattern = 0;
+  if (result.top_left)     result.pattern |= 0b0001;
+  if (result.top_right)    result.pattern |= 0b0010;
+  if (result.bottom_left)  result.pattern |= 0b0100;
+  if (result.bottom_right) result.pattern |= 0b1000;
+  
+  // Count edges
+  result.count = result.top_left + result.top_right + result.bottom_left + result.bottom_right;
+  
+  return result;
+}
+
+// Convert SumoAction to string for debugging/telemetry
+const char* actionToString(SumoAction action) {
+  switch (action) {
+    case SEARCH_OPPONENT: return "SEARCH";
+    case ATTACK_FORWARD: return "ATTACK";
+    case RETREAT_FORWARD: return "RETREAT_FWD";
+    case RETREAT_BACKWARD: return "RETREAT_BACK";
+    case RETREAT_FORWARD_LEFT: return "RETREAT_FWD_LEFT";
+    case RETREAT_FORWARD_RIGHT: return "RETREAT_FWD_RIGHT";
+    case RETREAT_BACKWARD_LEFT: return "RETREAT_BACK_LEFT";
+    case RETREAT_BACKWARD_RIGHT: return "RETREAT_BACK_RIGHT";
+    case RETREAT_LEFT: return "RETREAT_LEFT";
+    case RETREAT_RIGHT: return "RETREAT_RIGHT";
+    case EMERGENCY_STOP: return "EMERGENCY_STOP";
+    case IDLE: return "IDLE";
+    default: return "UNKNOWN";
+  }
+}
 
 // Thread-safe threshold access
 float getThreshold(int index) {
@@ -567,6 +634,18 @@ String buildStreamJSON() {
   json += ",\"test_mode\":\"" + String(TestModeUtils::getModeString(test_mode_state.mode)) + "\"";
   json += "," + MotorTestMode::buildMotorJSON(test_mode_state);
   
+  // Edge detection and action state (from Core 0)
+  json += ",\"robot_state\":{";
+  json += "\"action\":\"" + String(actionToString(current_action)) + "\"";
+  json += ",\"edges\":{";
+  json += "\"count\":" + String(current_edges.count);
+  json += ",\"pattern\":" + String(current_edges.pattern);
+  json += ",\"A0\":" + String(current_edges.top_left ? "true" : "false");
+  json += ",\"A1\":" + String(current_edges.top_right ? "true" : "false");
+  json += ",\"A2\":" + String(current_edges.bottom_left ? "true" : "false");
+  json += ",\"A3\":" + String(current_edges.bottom_right ? "true" : "false");
+  json += "}}";
+  
   json += "}\n";
   return json;
 }
@@ -607,8 +686,12 @@ void loop() {
     return;
   }
   
+  // Analyze edge detection for telemetry
+  current_edges = analyzeEdges(local_sensors);
+  
   // Run state machine logic
   SumoAction action = decideAction(local_sensors);
+  current_action = action;  // Store for telemetry
   
   // Execute action (motor commands)
   MotorCommand cmd = executeAction(action, local_sensors);
@@ -618,11 +701,17 @@ void loop() {
   shared_motor_cmd = cmd;
   mutex_exit(&motor_mutex);
   
-  // Status logging (every 100 loops)
+  // Status logging (every 100 loops) with enhanced edge detection info
   if (core0_loop_count % 100 == 0) {
-    Serial.printf("Core 0: Action=%d | Mode=%d | IR0=%.2fV | ToF0=%dmm\n",
-                  action, local_sensors.button_mode, 
-                  local_sensors.ir_volts[0], local_sensors.tof_distance[0]);
+    Serial.printf("Core 0: Action=%s | Edges=%d [A0:%d A1:%d A2:%d A3:%d] | Mode=%d | IR0=%.2fV | ToF0=%dmm | Motors L:%d R:%d\n",
+                  actionToString(action),
+                  current_edges.count,
+                  current_edges.top_left, current_edges.top_right, 
+                  current_edges.bottom_left, current_edges.bottom_right,
+                  local_sensors.button_mode, 
+                  local_sensors.ir_volts[0], 
+                  local_sensors.tof_distance[0],
+                  cmd.left_speed, cmd.right_speed);
   }
   
   delay(10); // State machine runs at ~100Hz
@@ -635,27 +724,79 @@ SumoAction decideAction(const SensorData &sensors) {
     return IDLE;
   }
   
-  // Check edge detection (IR sensors)
-  int edges_detected = 0;
-  for (int i = 0; i < IR_SENSOR_COUNT; i++) {
-    if (sensors.ir_volts[i] > getThreshold(i)) {
-      edges_detected++;
+  // ===== PRIORITY 1: Edge Detection (highest priority) =====
+  EdgeDetection edges = analyzeEdges(sensors);
+  
+  // Emergency stop if 3 or more edges detected (likely off platform or sensor failure)
+  if (edges.count >= 3) {
+    return EMERGENCY_STOP;
+  }
+  
+  // Handle edge detection patterns
+  if (edges.count > 0) {
+    // Pattern matching for directional retreat
+    // Patterns use bitfield: [A3 A2 A1 A0]
+    
+    switch (edges.pattern) {
+      // Single sensor detections (corners)
+      case 0b0001:  // A0 only (top-left) - retreat backward-right
+        return RETREAT_BACKWARD_RIGHT;
+        
+      case 0b0010:  // A1 only (top-right) - retreat backward-left
+        return RETREAT_BACKWARD_LEFT;
+        
+      case 0b0100:  // A2 only (bottom-left) - retreat forward-right
+        return RETREAT_FORWARD_RIGHT;
+        
+      case 0b1000:  // A3 only (bottom-right) - retreat forward-left
+        return RETREAT_FORWARD_LEFT;
+      
+      // Two sensor detections (edges and sides)
+      case 0b0011:  // A0+A1 (both top) - retreat backward
+        return RETREAT_BACKWARD;
+        
+      case 0b1100:  // A2+A3 (both bottom) - retreat forward
+        return RETREAT_FORWARD;
+        
+      case 0b0101:  // A0+A2 (left side) - retreat right
+        return RETREAT_RIGHT;
+        
+      case 0b1010:  // A1+A3 (right side) - retreat left
+        return RETREAT_LEFT;
+      
+      // Diagonal patterns (adjacent corners)
+      case 0b1001:  // A0+A3 (diagonal: top-left + bottom-right) - retreat forward-right
+        return RETREAT_FORWARD_RIGHT;
+        
+      case 0b0110:  // A1+A2 (diagonal: top-right + bottom-left) - retreat forward-left
+        return RETREAT_FORWARD_LEFT;
+      
+      // Complex patterns (fallback to nearest safe direction)
+      default:
+        // If top sensors involved, retreat backward
+        if (edges.top_left || edges.top_right) {
+          return RETREAT_BACKWARD;
+        }
+        // If bottom sensors involved, retreat forward
+        if (edges.bottom_left || edges.bottom_right) {
+          return RETREAT_FORWARD;
+        }
+        // Shouldn't reach here, but emergency stop as fallback
+        return EMERGENCY_STOP;
     }
   }
   
-  if (edges_detected >= 2) {
-    return EMERGENCY_REVERSE;
-  } else if (edges_detected == 1) {
-    return RETREAT_AND_TURN;
-  }
-  
-  // Check ToF for opponent detection
-  bool opponent_front = sensors.tof_valid[1] && sensors.tof_distance[1] < 800; // Front sensor
+  // ===== PRIORITY 2: Opponent Detection (attack mode) =====
+  // Check ToF sensors for opponent
+  bool opponent_front = sensors.tof_valid[1] && sensors.tof_distance[1] < 800;  // Front sensor
+  bool opponent_left = sensors.tof_valid[0] && sensors.tof_distance[0] < 800;   // Left sensor
+  bool opponent_right = sensors.tof_valid[2] && sensors.tof_distance[2] < 800;  // Right sensor
   
   if (opponent_front) {
     return ATTACK_FORWARD;
   }
   
+  // ===== PRIORITY 3: Search Mode (default behavior) =====
   return SEARCH_OPPONENT;
 }
 
@@ -671,25 +812,80 @@ MotorCommand executeAction(SumoAction action, const SensorData &sensors) {
       cmd.right_speed = 0;
       cmd.emergency_stop = true;
       break;
+    
+    case EMERGENCY_STOP:
+      cmd.left_speed = 0;
+      cmd.right_speed = 0;
+      cmd.emergency_stop = true;
+      break;
       
     case SEARCH_OPPONENT:
+      // Rotate in place to scan for opponent
       cmd.left_speed = 50;
-      cmd.right_speed = -50; // Rotate in place
+      cmd.right_speed = -50;
       break;
       
     case ATTACK_FORWARD:
+      // Full speed forward attack
       cmd.left_speed = 100;
-      cmd.right_speed = 100; // Full speed forward
+      cmd.right_speed = 100;
+      break;
+    
+    // ===== Edge Detection Retreat Actions =====
+    
+    case RETREAT_FORWARD:
+      // Both bottom sensors detected - move forward away from rear edge
+      cmd.left_speed = 80;
+      cmd.right_speed = 80;
       break;
       
-    case RETREAT_AND_TURN:
-      cmd.left_speed = -60;
-      cmd.right_speed = -40; // Back and turn
+    case RETREAT_BACKWARD:
+      // Both top sensors detected - move backward away from front edge
+      cmd.left_speed = -80;
+      cmd.right_speed = -80;
       break;
       
-    case EMERGENCY_REVERSE:
-      cmd.left_speed = -100;
-      cmd.right_speed = -100; // Full reverse
+    case RETREAT_FORWARD_LEFT:
+      // Bottom-right sensor (A3) or diagonal - retreat forward and turn left
+      cmd.left_speed = 40;   // Slower left for turning
+      cmd.right_speed = 80;  // Faster right
+      break;
+      
+    case RETREAT_FORWARD_RIGHT:
+      // Bottom-left sensor (A2) or diagonal - retreat forward and turn right
+      cmd.left_speed = 80;   // Faster left
+      cmd.right_speed = 40;  // Slower right for turning
+      break;
+      
+    case RETREAT_BACKWARD_LEFT:
+      // Top-right sensor (A1) - retreat backward and turn left
+      cmd.left_speed = -40;  // Slower reverse left for turning
+      cmd.right_speed = -80; // Faster reverse right
+      break;
+      
+    case RETREAT_BACKWARD_RIGHT:
+      // Top-left sensor (A0) - retreat backward and turn right
+      cmd.left_speed = -80;  // Faster reverse left
+      cmd.right_speed = -40; // Slower reverse right for turning
+      break;
+      
+    case RETREAT_LEFT:
+      // Right side sensors (A1+A3) - strafe/turn left aggressively
+      cmd.left_speed = -60;  // Reverse left
+      cmd.right_speed = 60;  // Forward right (spin left)
+      break;
+      
+    case RETREAT_RIGHT:
+      // Left side sensors (A0+A2) - strafe/turn right aggressively
+      cmd.left_speed = 60;   // Forward left (spin right)
+      cmd.right_speed = -60; // Reverse right
+      break;
+      
+    default:
+      // Unknown action - stop as safety measure
+      cmd.left_speed = 0;
+      cmd.right_speed = 0;
+      cmd.emergency_stop = true;
       break;
   }
   
