@@ -1,0 +1,63 @@
+# Arduino / C++ Build Artifacts
+*.o
+*.a
+*.so
+*.exe
+*.dll
+*.out
+build/
+bin/
+obj/
+
+# Arduino IDE
+*.ino.with_bootloader.bin
+*.ino.map
+*.ino.elf
+*.ino.bin
+*.ino.hex
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains IDEs
+.idea/
+*.iml
+
+# System Files
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+
+# Logs
+*.log
+log/
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+secrets.h
+config_local.h
+
+# Python (for test scripts)
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Documentation build
+docs/_build/
+*.pdf
+
+# Temporary files
+*~
+*.bak
+*.orig
