@@ -10,6 +10,7 @@
  */
 
 #include "Car.h"
+#include <pico/multicore.h>
 
 // Pin definitions (adjust for your hardware)
 const uint8_t LEFT_PWM_PIN  = 14;
@@ -17,6 +18,7 @@ const uint8_t LEFT_DIR_PIN  = 15;
 const uint8_t RIGHT_PWM_PIN = 11;
 const uint8_t RIGHT_DIR_PIN = 12;
 const uint8_t buttonPIN = 28;
+const uint8_t LED_PIN = 25;  // Built-in LED on Raspberry Pi Pico
 
 int buttonValue;
 // PWM frequency for motor control
@@ -57,6 +59,7 @@ void setup() {
   }
   
   Serial.println("Starting movement sequence in 2 seconds...");
+  robot.stop();
   delay(2000);
   
   // Set button pin as input
@@ -66,16 +69,33 @@ void setup() {
 void loop() {
   // Read button state
   buttonValue = digitalRead(buttonPIN);
-  
-  // If button is pressed (LOW), move forward at full speed
+  Serial.print("buttonValue");
+  Serial.println(buttonValue);
+  // If button is NOT pressed (HIGH), move forward at full speed
   if (buttonValue == LOW) {
     robot.forward(100);
-    Serial.println("Button pressed - Forward 100%");
-  } else {
-    // Otherwise, stop
+    Serial.println("Button not pressed - Forward 100%");
+  } 
+  else {
+    // Button pressed (LOW), stop
     robot.stop();
   }
   
   delay(50);  // Small delay for debouncing
+}
+
+// Core 1 - LED Blink
+void setup1() {
+  // Initialize LED pin on core 1
+  pinMode(LED_PIN, OUTPUT);
+  Serial.println("✓ Core 1 LED initialized");
+}
+
+void loop1() {
+  // Blink LED on core 1 (500ms on, 500ms off)
+  digitalWrite(LED_PIN, HIGH);
+  delay(500);
+  digitalWrite(LED_PIN, LOW);
+  delay(500);
 }
 

@@ -54,7 +54,7 @@ void Motor::setDuty(float speed) {
   // Determine direction and absolute duty cycle
   const bool forward = (speed >= 0.0f);
   const float abs_duty = forward ? speed : -speed;
-  const float duty_fraction = abs_duty * 0.01f;  // Convert percentage to 0.0-1.0
+  const float duty_fraction = 1 - abs_duty * 0.01f;  // Convert percentage to 0.0-1.0
   
   // Set direction pin
   digitalWrite(_dir_pin, forward ? HIGH : LOW);
@@ -67,7 +67,8 @@ void Motor::setDuty(float speed) {
 void Motor::stop() {
   if (!_initialized) return;
   
-  pwm_set_chan_level(_slice, _channel, 0);
+  // Set PWM to _top (100% high time = 0% motor power in inverted logic)
+  pwm_set_chan_level(_slice, _channel, _top);
   digitalWrite(_dir_pin, LOW);
 }
 

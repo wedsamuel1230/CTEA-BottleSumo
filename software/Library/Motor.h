@@ -46,7 +46,6 @@ private:
   static float clampSpeed(float speed);
 };
 
-#endif  // MOTOR_H (kept for compatibility)
 
 // Application Layer
 // Library.ino
