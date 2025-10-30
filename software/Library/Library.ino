@@ -12,11 +12,13 @@
 #include "Car.h"
 
 // Pin definitions (adjust for your hardware)
-const uint8_t LEFT_PWM_PIN  = 2;
-const uint8_t LEFT_DIR_PIN  = 3;
-const uint8_t RIGHT_PWM_PIN = 4;
-const uint8_t RIGHT_DIR_PIN = 5;
+const uint8_t LEFT_PWM_PIN  = 14;
+const uint8_t LEFT_DIR_PIN  = 15;
+const uint8_t RIGHT_PWM_PIN = 11;
+const uint8_t RIGHT_DIR_PIN = 12;
+const uint8_t buttonPIN = 28;
 
+int buttonValue;
 // PWM frequency for motor control
 // Available ranges (from Motor.h):
 //   - Minimum: ~1.9 kHz (max resolution, TOP=65535)
@@ -27,9 +29,9 @@ const uint8_t RIGHT_DIR_PIN = 5;
 //
 // Trade-off: Higher frequency = faster switching, BUT lower duty cycle resolution
 // For smooth motor control, use 10-50 kHz. For high-speed digital signals, up to 1.25 MHz.
-const uint32_t MOTOR_PWM_FREQ = 20000;  // 20 kHz (recommended for silent motor operation)
+//const uint32_t MOTOR_PWM_FREQ = 20000;  // 20 kHz (recommended for silent motor operation)
 // Alternative high-performance option:
-// const uint32_t MOTOR_PWM_FREQ = Motor::PWM_FREQ_MAX_RECOMMENDED;  // ~488 kHz
+const uint32_t MOTOR_PWM_FREQ = Motor::PWM_FREQ_MAX_RECOMMENDED;  // ~488 kHz
 
 // Create car instance
 Car robot;
@@ -56,36 +58,24 @@ void setup() {
   
   Serial.println("Starting movement sequence in 2 seconds...");
   delay(2000);
+  
+  // Set button pin as input
+  pinMode(buttonPIN, INPUT_PULLUP);
 }
 
 void loop() {
-  // Movement demonstration sequence
-  Serial.println("Forward 50%");
-  robot.forward(50);
-  delay(2000);
+  // Read button state
+  buttonValue = digitalRead(buttonPIN);
   
-  Serial.println("Backward 50%");
-  robot.backward(50);
-  delay(2000);
+  // If button is pressed (LOW), move forward at full speed
+  if (buttonValue == LOW) {
+    robot.forward(100);
+    Serial.println("Button pressed - Forward 100%");
+  } else {
+    // Otherwise, stop
+    robot.stop();
+  }
   
-  Serial.println("Turn Left 70%");
-  robot.turnLeft(70);
-  delay(1000);
-  
-  Serial.println("Turn Right 70%");
-  robot.turnRight(70);
-  delay(1000);
-  
-  Serial.println("Stop");
-  robot.stop();
-  delay(2000);
-  
-  // Advanced: Manual differential drive
-  Serial.println("Differential: L=30% R=60%");
-  robot.setMotors(30, 60);
-  delay(1500);
-  
-  robot.stop();
-  delay(3000);
+  delay(50);  // Small delay for debouncing
 }
 
