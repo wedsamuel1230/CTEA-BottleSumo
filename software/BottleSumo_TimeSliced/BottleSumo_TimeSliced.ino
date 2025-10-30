@@ -46,6 +46,10 @@
 
 // ========== Hardware Configuration ==========
 
+//I2C pin
+constexpr uint8_t I2C_SDA = 3;
+constexpr uint8_t I2C_SCL = 2;
+
 // Button pins
 constexpr uint8_t BUTTON_TEST_MODE_PIN = 15;  // GP15
 constexpr uint8_t BUTTON_RUN_MODE_PIN = 16;   // GP16
@@ -261,8 +265,8 @@ bool setThreshold(int index, float value) {
 
 // Initialize Wire1 for ToF sensors
 void initWire1() {
-  Wire1.setSDA(26);  // GP26
-  Wire1.setSCL(27);  // GP27
+  Wire1.setSDA(I2C_SDA);
+  Wire1.setSCL(I2C_SCL);  
   Wire1.begin();
   Wire1.setClock(400000);
 }
