@@ -31,4 +31,3 @@ private:
   Motor rightMotor;
 };
 
-#endif  // CAR_H (kept for compatibility)

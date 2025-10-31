@@ -45,34 +45,3 @@ private:
   // Clamp speed to valid range
   static float clampSpeed(float speed);
 };
-
-#endif  // MOTOR_H (kept for compatibility)
-
-// Application Layer
-// Library.ino
-// Main Sketch
-
-// Driver Layer
-// Motor Class
-// PWM Control
-
-// Hardware Layer - RP2040
-// hardware/pwm.h
-// RP2040 SDK
-// GPIO Pins
-// PWM + Direction
-// H-Bridge Driver
-// External Hardware
-
-// Library -->|initializeMotors<br/>forward/backward/turn| Car
-// Car -->|setDuty| Motor
-// Motor -->|pwm_set_chan_level<br/>digitalWrite| SDK
-// SDK --> GPIO
-// GPIO --> HW
-
-// style Library fill:#e1f5ff
-// style Car fill:#b3e0ff
-// style Motor fill:#66c2ff
-// style SDK fill:#ffeb99
-// style GPIO fill:#ffe066
-// style HW fill:#ffd633
