@@ -1,0 +1,9 @@
+Partlist exported from Fusion Hub: wed   Project: BottleSumo  Board: Control Board(mount,sensors) v15 at 3/11/2025 下午6:40
+
+Qty Value              Device             Package          Parts                        Description         POPULARITY
+2   24GP-MOTOR-MOUNT   24GP-MOTOR-MOUNT   24GP-MOTOR-MOUNT U$1, U$2                                                   
+1   ADS1115            ADS1115            ADS1115          U1                                                         
+1   FK141R-254-9P      FK141R-254-9P      KF141R-254-9P    X1                                                         
+4   MOUNT-PAD-ROUND3.2 MOUNT-PAD-ROUND3.2 3,2-PAD          H1, H2, H3, H4               MOUNTING PAD, round 4         
+4   QRE1113            QRE1113            QRE1113          IR1, IR2, IR3, IR4                                         
+5   VL53L0XRECTANGLE   VL53L0XRECTANGLE   VL53L0X          TOF1, TOF2, TOF3, TOF4, TOF5                               
