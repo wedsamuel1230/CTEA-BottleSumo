@@ -10,7 +10,7 @@
 #include "Ads1115Sampler.h"
 
 // Sensor objects
-ToFArray tof(&Wire, nullptr);
+ToFArray tof(&Wire1, nullptr);
 Ads1115Sampler adc;
 
 // Data storage
@@ -22,25 +22,19 @@ float adcVolts[4];
 unsigned long lastRead = 0;
 const uint32_t READ_INTERVAL = 100;
 
+// Track which ADC channel we're currently reading
+uint8_t currentAdcChannel = 0;
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  
+  Wire1.setSDA(2);
+  Wire1.setSCL(3);
+  Wire1.begin();
   Serial.println("Minimal Sensor Test");
   Serial.println("==================");
-  
-  // Init I2C
-  Wire.begin();
-  
-  // Init ToF (3 sensors)
-  uint8_t xshut[] = {16, 17, 18};
-  uint8_t addr[] = {0x30, 0x31, 0x32};
-  if (tof.configure(3, xshut, addr)) {
-    Serial.printf("ToF: %d sensors online\n", tof.beginAll());
-  }
-  
   // Init ADC
-  if (adc.begin(0x48, &Wire, GAIN_TWOTHIRDS, RATE_ADS1115_128SPS)) {
+  if (adc.begin(0x48, &Wire1, GAIN_ONE, RATE_ADS1115_128SPS)) {
     Serial.println("ADC: Ready");
   }
   
@@ -54,18 +48,16 @@ void loop() {
   if (now - lastRead >= READ_INTERVAL) {
     lastRead = now;
     
-    // Read sensors
-    tof.readAll(tofData);
-    adc.readAll(adcRaw, adcVolts, 4);
+    // Non-blocking ADC read: start conversion on each channel in sequence
+    adc.startConversion(currentAdcChannel);
     
-    // Print ToF
-    Serial.print("ToF: ");
-    for (int i = 0; i < 3; i++) {
-      if (tofData[i].valid) {
-        Serial.printf("%d:%4dmm ", i, tofData[i].distanceMm);
-      } else {
-        Serial.printf("%d:---- ", i);
-      }
+    // Poll for completion (typically completes within 8-16ms at 128 SPS)
+    if (adc.poll()) {
+      adcRaw[currentAdcChannel] = adc.getLastResult();
+      adcVolts[currentAdcChannel] = adc.getLastResultVolts();
+      
+      // Move to next channel (0-3, wrap around)
+      currentAdcChannel = (currentAdcChannel + 1) % 4;
     }
     
     // Print ADC
@@ -77,5 +69,5 @@ void loop() {
     Serial.println();
   }
   
-  delay(1);
+  delay(10);
 }

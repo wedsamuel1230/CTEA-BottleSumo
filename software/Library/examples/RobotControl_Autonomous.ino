@@ -82,6 +82,9 @@ unsigned long lastAdcRead = 0;
 unsigned long lastControlUpdate = 0;
 unsigned long lastStatusPrint = 0;
 
+// ADC channel tracking for non-blocking reads
+uint8_t currentAdcChannel = 0;
+
 // System state
 bool systemInitialized = false;
 bool emergencyStop = false;
@@ -257,7 +260,17 @@ void updateSensors(unsigned long currentTime) {
   if (currentTime - lastAdcRead >= ADC_READ_INTERVAL) {
     lastAdcRead = currentTime;
     
-    adc.readAll(adcRawValues, adcVoltages, 4);
+    // Non-blocking ADC read: start conversion on current channel
+    adc.startConversion(currentAdcChannel);
+    
+    // Poll for completion
+    if (adc.poll()) {
+      adcRawValues[currentAdcChannel] = adc.getLastResult();
+      adcVoltages[currentAdcChannel] = adc.getLastResultVolts();
+      
+      // Advance to next channel
+      currentAdcChannel = (currentAdcChannel + 1) % 4;
+    }
     
     // Process ADC data
     currentSensorData.batteryVoltage = adcVoltages[0];

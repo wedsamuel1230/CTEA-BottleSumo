@@ -52,6 +52,9 @@ unsigned long lastTofRead = 0;
 unsigned long lastAdcRead = 0;
 unsigned long lastSerialPrint = 0;
 
+// ADC channel tracking for non-blocking reads
+uint8_t currentAdcChannel = 0;
+
 // Status flags
 bool tofInitialized = false;
 bool adcInitialized = false;
@@ -136,14 +139,22 @@ void loop() {
   }
   
   // -------------------------------------------------------------------------
-  // Task 2: Read ADC Channels (every 50ms)
+  // Task 2: Read ADC Channels (every 50ms, non-blocking)
   // -------------------------------------------------------------------------
   if (adcInitialized && (currentTime - lastAdcRead >= ADC_READ_INTERVAL)) {
     lastAdcRead = currentTime;
     
-    // Read all ADC channels
-    // Fast operation: ~32ms for 4 channels at 128 SPS
-    adc.readAll(adcRawValues, adcVoltages, ADC_CHANNELS);
+    // Start conversion on current channel
+    adc.startConversion(currentAdcChannel);
+    
+    // Non-blocking poll for completion
+    if (adc.poll()) {
+      adcRawValues[currentAdcChannel] = adc.getLastResult();
+      adcVoltages[currentAdcChannel] = adc.getLastResultVolts();
+      
+      // Advance to next channel (cycle through 0-3)
+      currentAdcChannel = (currentAdcChannel + 1) % ADC_CHANNELS;
+    }
     
     // Optional: Process ADC data immediately
     // processAdcData();
