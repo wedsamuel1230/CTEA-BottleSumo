@@ -1,4 +1,4 @@
-`/**************************************************************************
+/**************************************************************************
  This is an example for our Monochrome OLEDs based on SSD1306 drivers
 
  Pick one up today in the adafruit shop!
@@ -41,8 +41,8 @@ Adafruit_VL53L0X lox = Adafruit_VL53L0X();
 
 void setup() {
   Serial.begin(9600);
-  Wire1.setSDA(26);
-  Wire1.setSCL(27);
+  Wire1.setSDA(2);
+  Wire1.setSCL(3);
   Wire1.begin();
   if (!lox.begin(0x29,false,&Wire1)) {
     Serial.println(F("Failed to boot VL53L0X"));
@@ -53,16 +53,10 @@ void setup() {
 void loop() {
   VL53L0X_RangingMeasurementData_t measure;
   lox.rangingTest(&measure, false); // pass in 'true' to get debug data printout!
-  display.clearDisplay();
   if (measure.RangeStatus != 4) {  // phase failures have incorrect data
-    display.setCursor(0,10);
-    display.print("Distance (mm): "); 
-    display.print(measure.RangeMilliMeter);
     Serial.print("Distance (mm): "); Serial.println(measure.RangeMilliMeter);
   } else {
-    display.println(" out of range ");
     Serial.println(" out of range ");
   }
-  display.display();
   delay(500);
 }
