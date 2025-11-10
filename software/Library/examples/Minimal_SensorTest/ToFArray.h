@@ -61,6 +61,6 @@ private:
   uint32_t _budgetUs;
   uint8_t _preRange;
   uint8_t _finalRange;
-  const uint16_t _resetDelayMs = 50;
-  const uint16_t _postResetDelayMs = 20;
+  const uint16_t _resetDelayMs = 100;
+  const uint16_t _postResetDelayMs = 50;
 };

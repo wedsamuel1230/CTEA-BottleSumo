@@ -41,4 +41,6 @@ private:
   TwoWire* _wire;
   uint8_t _currentChannel;
   int16_t _lastRaw;
+  unsigned long _conversionStartTime;
+  const uint16_t _conversionTimeoutMs = 20;  // 128 SPS = 7.8ms typical, 20ms safe margin
 };

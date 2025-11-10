@@ -32,8 +32,8 @@ void setup() {
   Serial.begin(115200);
   while (!Serial && millis() < 3000);
   
-  Wire1.setSDA(26);
-  Wire1.setSCL(27);
+  Wire1.setSDA(2);
+  Wire1.setSCL(3);
   Wire1.begin();
   
   Serial.println("\n=== 5-Sensor ToF Debug Init ===\n");

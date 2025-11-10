@@ -17,6 +17,7 @@ bool Ads1115Sampler::begin(uint8_t i2cAddress, TwoWire* wire, adsGain_t gain, ui
   if (_inited) {
     _ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_0, /*continuous=*/true);
     _currentChannel = 0;
+    _conversionStartTime = millis();
   }
   
   return _inited;
@@ -46,13 +47,15 @@ void Ads1115Sampler::startConversion(uint8_t channel) {
   // Switch to new channel and trigger read (continuous mode will keep reading)
   _currentChannel = channel;
   _ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_0 | (channel & 0x03), /*continuous=*/true);
+  _conversionStartTime = millis();  // Track conversion start time
 }
 
 bool Ads1115Sampler::poll() {
   if (!_inited) return false;
   
-  // Check if conversion is complete
-  if (_ads.conversionComplete()) {
+  // Check if conversion is complete OR if timeout reached (safety net for stuck conversion)
+  unsigned long elapsed = millis() - _conversionStartTime;
+  if (_ads.conversionComplete() || elapsed >= _conversionTimeoutMs) {
     _lastRaw = _ads.getLastConversionResults();
     return true;
   }
