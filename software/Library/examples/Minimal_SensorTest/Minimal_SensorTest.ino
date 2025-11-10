@@ -15,9 +15,9 @@
 #include "Ads1115Sampler.h"
 
 // ToF Configuration: 1 sensor with XSHUT pin
-const uint8_t TOF_NUM = 1;
-const uint8_t TOF_XSHUT_PINS[TOF_NUM] = {8};
-const uint8_t TOF_I2C_ADDR[TOF_NUM] = {0x29};
+const uint8_t TOF_NUM = 5;
+const uint8_t TOF_XSHUT_PINS[TOF_NUM] = {8,7,6,5,4};
+const uint8_t TOF_I2C_ADDR[TOF_NUM] = {0x29,0x31,0x33,0x35,0x37};
 
 // Sensor objects
 ToFArray tof(&Wire1,nullptr);
@@ -78,7 +78,7 @@ void loop() {
     lastRead = now;
     
     // Read ToF sensor
-    tof.readAll(tofData, 30, 1500, 2);
+    tof.readAll(tofData, 4, 1500, 2);
     
     // Non-blocking ADC read: start conversion on each channel in sequence
     adc.startConversion(currentAdcChannel);
@@ -94,8 +94,10 @@ void loop() {
     
     // Print ToF
     Serial.print("| ToF: ");
-    Serial.printf("%dmm(%s) ", tofData[0].distanceMm, tofData[0].valid ? "ok" : "xx");
-    
+    Serial.printf("%dmm(%s) ", tofData[1].distanceMm, tofData[1].valid ? "ok" : "xx");
+    Serial.printf("%dmm(%s) ", tofData[2].distanceMm, tofData[2].valid ? "ok" : "xx");
+    Serial.printf("%dmm(%s) ", tofData[3].distanceMm, tofData[3].valid ? "ok" : "xx");
+    Serial.printf("%dmm(%s) ", tofData[4].distanceMm, tofData[4].valid ? "ok" : "xx");
     // Print ADC
     Serial.print("| ADC: ");
     Serial.printf("%d:%.2fV ", 0, adcVolts[0]);
