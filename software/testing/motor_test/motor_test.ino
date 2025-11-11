@@ -10,6 +10,7 @@ Car car;
 
 void setup() {
   Serial.begin(115200);
+  pinMode(LED_BUILTIN, OUTPUT);
   car.initializeMotors(LEFT_MOTOR_PWM_PIN, LEFT_MOTOR_DIR_PIN,
                        RIGHT_MOTOR_PWM_PIN, RIGHT_MOTOR_DIR_PIN,
                        MOTOR_FREQ);
@@ -22,7 +23,9 @@ void setup() {
 }
 
 void loop() {
-  car.turnLeft(0);
-  delay(200);
-  car.stop();
+  digitalWrite(LED_BUILTIN, HIGH);
+  car.turnLeft(20.0F);
+  delay(5000);
+  car.turnRight(20.0F);
+  delay(5000);
 }
