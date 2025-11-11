@@ -33,31 +33,39 @@ void scanI2C() {
 void setup() {
   Serial.begin(115200);
   delay(2000);
+  Serial.println("ToF Sensor Test - Pico W");
 
   // Setup reset button
   pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
   
-  // Initialize I2C
+  // Initialize I2C on Wire1 (GP2=SDA, GP3=SCL)
   Wire1.setSDA(2);
   Wire1.setSCL(3);
   Wire1.begin();
   Wire1.setClock(400000);
+  Serial.println("I2C Wire1 initialized (400kHz)");
+  
+  // Scan I2C bus before initialization
+  Serial.println("\nBefore initialization:");
+  scanI2C();
   
   // Configure and initialize ToF sensors
   tof_array.configure(5, TOF_XSHUT_PINS, TOF_ADDRESSES);
-  tof_array.setTiming(100000, 14, 10);  // 100ms timing budget (was 300ms)
-  delay(100);
-  uint8_t online = tof_array.beginAll();
-  delay(100);
-  Serial.printf("ToF sensors initialized: %d/5\n", online);
+  tof_array.setTiming(50000, 14, 10);  // 50ms timing budget for stable readings
   
+  uint8_t online = tof_array.beginAll();
+  Serial.printf("\nToF sensors initialized: %d/5\n", online);
+  
+  // Scan I2C bus after initialization
+  Serial.println("\nAfter initialization:");
   scanI2C();
-  Serial.println();
+  
+  Serial.println("\nStarting sensor readings...\n");
 }
 
 void loop() {
   if (digitalRead(RESET_BUTTON_PIN) == LOW) {
-    Serial.println("RESET!");
+    Serial.println("\n!!! RESET BUTTON PRESSED - Rebooting !!!");
     delay(1000);
     rp2040.reboot();
   }
@@ -71,14 +79,10 @@ void loop() {
       Serial.printf("S%d:%4dmm ", i, samples[i].distanceMm);
       validCount++;
     } else {
-      // Show status code to help debug
-      Serial.printf("S%d:ERR(0x%02X) ", i, samples[i].status);
+      Serial.printf("S%d:---- ", i);
     }
   }
   Serial.printf("(%d/5)\n", validCount);
-
-  scanI2C();
-  Serial.println();
   
-  delay(500);
+  delay(300);  // Match TimeSliced timing (every ~300ms)
 }
