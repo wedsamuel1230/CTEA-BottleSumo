@@ -20,7 +20,7 @@ void setup() {
   
   // Configure ToF sensors
   tof_array.configure(5, TOF_XSHUT_PINS, TOF_ADDRESSES);
-  tof_array.setTiming(100000, 14, 10); // 50ms per sensor
+  tof_array.setTiming(300000, 14, 10); // 300ms per sensor
   
   uint8_t online = tof_array.beginAll();
   Serial.printf("ToF sensors online: %d/5\n", online);
