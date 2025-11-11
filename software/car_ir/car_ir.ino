@@ -12,12 +12,20 @@ constexpr uint32_t MOTOR_FREQ = 20000; // 20 kHz
 constexpr uint8_t IR_SENSOR_CHANNELS = 4;
 constexpr uint8_t IR_SENSOR_PINS[IR_SENSOR_CHANNELS] = {0, 1, 2, 3}; // A0 to A3
 constexpr uint8_t ADS1115_I2C_ADDRESS = 0x48;
+
+// Dynamic threshold variables
 float ir_threshold = 2.5F; // Voltage threshold for IR detection
+float threshold_min = 0.0F; // Calibration: min voltage seen
+float threshold_max = 5.0F; // Calibration: max voltage seen
+bool auto_threshold_enabled = false;
+unsigned long calibration_start = 0;
+const unsigned long CALIBRATION_DURATION_MS = 3000UL; // 3 seconds to calibrate
+
 /*
-A3 (Channel 3) - bottom-right IR Sensor
-A2 (Channel 2) - top-right IR Sensor
-A1 (Channel 1) - top-left IR Sensor
-A0 (Channel 0) - bottom-left IR Sensor
+A3 (Channel 3) - Bottom-Right IR Sensor
+A2 (Channel 2) - Top-Right IR Sensor
+A1 (Channel 1) - Top-Left IR Sensor
+A0 (Channel 0) - Bottom-Left IR Sensor
 
 ------------------------------------------------
 | IR Sensor Arrangement on the Car:            |
@@ -29,22 +37,28 @@ A0 (Channel 0) - bottom-left IR Sensor
 |               |                 |            |
 |       [Bottom-Left (A0)] [Bottom-Right (A3)] |
 ------------------------------------------------
-top: A1, A2
-bottom: A0, A3
+
+Bit Pattern Encoding: [A3][A2][A1][A0]
+Example: 0b1010 means A3=1, A2=0, A1=1, A0=0
 
 Behavior Logic:
-- If all sensors read low (above threshold), the path is clear: move forward.
-- If three or more sensors read high (below threshold), stop to avoid obstacles.
--> 0b1111, 0b1110, 0b1101, 0b1011, 0b0111
-- If only one or two sensors read high, adjust direction to stay on track.
-A1,A2 high -> backward -> 0b1100
-A0,A3 high -> forward -> 0b1001
-A1,A0 high -> turn right -> 0b0011
-A2,A3 high -> turn left -> 0b1100
-A1 only -> slight right -> 0b0010
-A0 only -> slight right -> 0b0001
-A2 only -> slight left -> 0b0100
-A3 only -> slight left -> 0b1000
+- Voltage < threshold → Sensor detects line (bit=1)
+- Voltage > threshold → Sensor sees clear path (bit=0)
+
+Actions:
+0b0000 - All clear → Forward (70%)
+0b1111/0b1110/0b1101/0b1011/0b0111 - 3+ sensors → STOP
+0b0001 - A0 (bottom-left) → Turn Right (30%)
+0b0010 - A1 (top-left) → Turn Right (30%)
+0b0100 - A2 (top-right) → Turn Left (30%)
+0b1000 - A3 (bottom-right) → Turn Left (30%)
+0b0011 - A0+A1 (left side) → Turn Right (50%)
+0b1100 - A2+A3 (right side) → Turn Left (50%)
+0b0101 - A0+A2 (diagonal) → Slight Right (40%)
+0b1010 - A1+A3 (diagonal) → Slight Left (40%)
+0b1001 - A0+A3 (bottom) → Forward (70%)
+0b0110 - A1+A2 (top) → Backward (70%)
+Other patterns → Enter search mode
 */
 
 Car car;
@@ -70,6 +84,82 @@ void stopSearchingMode() {
         searchingActive = false;
     }
     car.stop();
+}
+
+// Dynamic threshold functions
+void startCalibration() {
+    Serial.println("\n=== STARTING CALIBRATION ===");
+    Serial.println("Move car over white and black surfaces for 3 seconds...");
+    calibration_start = millis();
+    threshold_min = 5.0F; // Reset to max
+    threshold_max = 0.0F; // Reset to min
+    auto_threshold_enabled = true;
+}
+
+void updateCalibration(float voltValues[]) {
+    if (!auto_threshold_enabled) return;
+    
+    // Track min/max values
+    for (int i = 0; i < IR_SENSOR_CHANNELS; i++) {
+        if (voltValues[i] < threshold_min) threshold_min = voltValues[i];
+        if (voltValues[i] > threshold_max) threshold_max = voltValues[i];
+    }
+    
+    // Check if calibration time is up
+    if (millis() - calibration_start >= CALIBRATION_DURATION_MS) {
+        auto_threshold_enabled = false;
+        // Set threshold to midpoint
+        ir_threshold = (threshold_min + threshold_max) / 2.0F;
+        Serial.println("\n=== CALIBRATION COMPLETE ===");
+        Serial.printf("Min: %.3fV, Max: %.3fV\n", threshold_min, threshold_max);
+        Serial.printf("New Threshold: %.3fV\n", ir_threshold);
+        Serial.println("============================\n");
+    } else {
+        // Show progress
+        if ((millis() - calibration_start) % 500 < 50) {
+            Serial.printf("Calibrating... %.1fs remaining | Min: %.3fV Max: %.3fV\n", 
+                         (CALIBRATION_DURATION_MS - (millis() - calibration_start)) / 1000.0F,
+                         threshold_min, threshold_max);
+        }
+    }
+}
+
+void processSerialCommands() {
+    if (Serial.available() > 0) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        
+        if (cmd.equalsIgnoreCase("cal") || cmd.equalsIgnoreCase("calibrate")) {
+            startCalibration();
+        }
+        else if (cmd.startsWith("t+")) {
+            ir_threshold += 0.1F;
+            Serial.printf("Threshold increased to: %.3fV\n", ir_threshold);
+        }
+        else if (cmd.startsWith("t-")) {
+            ir_threshold -= 0.1F;
+            Serial.printf("Threshold decreased to: %.3fV\n", ir_threshold);
+        }
+        else if (cmd.startsWith("t=")) {
+            float newThreshold = cmd.substring(2).toFloat();
+            if (newThreshold > 0 && newThreshold < 5.0F) {
+                ir_threshold = newThreshold;
+                Serial.printf("Threshold set to: %.3fV\n", ir_threshold);
+            } else {
+                Serial.println("Invalid threshold value (must be 0-5V)");
+            }
+        }
+        else if (cmd.equalsIgnoreCase("help") || cmd.equals("?")) {
+            Serial.println("\n=== DYNAMIC THRESHOLD COMMANDS ===");
+            Serial.println("cal       - Start auto-calibration (3 seconds)");
+            Serial.println("t+        - Increase threshold by 0.1V");
+            Serial.println("t-        - Decrease threshold by 0.1V");
+            Serial.println("t=X.XXX   - Set threshold to specific value");
+            Serial.println("help or ? - Show this menu");
+            Serial.printf("\nCurrent threshold: %.3fV\n", ir_threshold);
+            Serial.println("==================================\n");
+        }
+    }
 }
 
 // Call this frequently from loop() to run the non-blocking search sequence
@@ -144,6 +234,12 @@ void setup(){
   }
   Serial.println("Motors initialized successfully");
   car.stop();
+  
+  // Print help on startup
+  Serial.println("\n=== Dynamic Threshold Control ===");
+  Serial.println("Type 'help' or '?' for commands");
+  Serial.printf("Current threshold: %.3fV\n", ir_threshold);
+  Serial.println("=================================\n");
 }
 
 void searching_mode(){
@@ -153,85 +249,146 @@ void searching_mode(){
 }
 
 void loop(){
-    // Read IR sensor values with non-blocking call
-    if (millis() % 100 < 20) { // Read every 100 ms
+    // Process serial commands for dynamic threshold control
+    processSerialCommands();
+    
+    // Read IR sensor values with non-blocking call (proper timing)
+    static unsigned long lastSensorRead = 0;
+    if (millis() - lastSensorRead >= 100) { // Read every 100 ms
+        lastSensorRead = millis();
+        
         int16_t rawValues[IR_SENSOR_CHANNELS];
         float voltValues[IR_SENSOR_CHANNELS];
         adcSampler.readAll(rawValues, voltValues, IR_SENSOR_CHANNELS);
-        Serial.print("IR Sensor Voltages: ");
-        for (int i = 0; i < IR_SENSOR_CHANNELS; i++) {
-            Serial.print(voltValues[i], 4);
-            Serial.print(" V ");
+        
+        // Update calibration if active
+        updateCalibration(voltValues);
+        
+        // Don't process sensor logic during calibration
+        if (auto_threshold_enabled) {
+            car.stop();
+            return;
         }
-        Serial.println();
-        // advanced no falling out of the table logic using switch-case
-        bool on_line[IR_SENSOR_CHANNELS];
+        
+        // Determine which sensors detect EDGE (voltage > threshold = out of area)
+        bool edge_detected[IR_SENSOR_CHANNELS];
         for (int i = 0; i < IR_SENSOR_CHANNELS; i++) {
-            on_line[i] = (voltValues[i] < ir_threshold);
+            edge_detected[i] = (voltValues[i] > ir_threshold);
         }
-        switch ((on_line[0] << 3) | (on_line[1] << 2) | (on_line[2] << 1) | on_line[3]) {
-            case 0b0000:
+        
+        // Create bit pattern: [A3][A2][A1][A0] 
+        // 1 = edge detected (danger!), 0 = safe
+        uint8_t pattern = (edge_detected[3] << 3) | (edge_detected[2] << 2) | (edge_detected[1] << 1) | edge_detected[0];
+        
+        // Print sensor readings - simple format
+        Serial.print("Sensors: ");
+        for (int i = 0; i < IR_SENSOR_CHANNELS; i++) {
+            Serial.printf("A%d:%.2fV ", i, voltValues[i]);
+        }
+        Serial.printf("| Thr:%.2fV | ", ir_threshold);
+        Serial.printf("| Thr:%.2fV | ", ir_threshold);
+        
+        /*
+        Sensor Layout:      Bit Pattern: [A3][A2][A1][A0]
+             Front
+          [A1]  [A2]       A1=top-left, A2=top-right
+           |      |        A0=bottom-left, A3=bottom-right
+          [A0]  [A3]
+          
+        HIGH voltage = Edge detected (OUT of safe area) - DANGER!
+        LOW voltage = On table (SAFE)
+        */
+        
+        switch (pattern) {
+            case 0b0000: // All safe - move forward
                 stopSearchingMode();
-                Serial.println("Path clear, moving forward");
+                Serial.println("Forward");
                 car.forward(70.0F);
                 break;
-            // 3 or more sensors active -> stop
-            case 0b1111:
-            case 0b1110:
-            case 0b1101:
-            case 0b1011:
-            case 0b0111:
+                
+            // Single sensor edge detection - back away from that edge
+            case 0b0001: // A0 (bottom-left) detects edge → Move back-right
                 stopSearchingMode();
-                Serial.println("Obstacles detected on 3 or more sensors, stopping");
-                car.stop();
-                break;
-            case 0b0001: //A0 only
-                stopSearchingMode();
-                Serial.println("Slight left adjustment");
-                car.turnLeft(30.0F);
-                break;
-            case 0b0010: //A1 only
-                stopSearchingMode();
-                Serial.println("Slight right adjustment");
-                car.turnRight(30.0F);
-                break;
-            case 0b0100: //A2 only
-                stopSearchingMode();
-                Serial.println("Slight left adjustment");
-                car.turnLeft(30.0F);
-                break;
-            case 0b1000: //A3 only
-                stopSearchingMode();
-                Serial.println("Slight right adjustment");
-                car.turnRight(30.0F);
-                break;
-            case 0b0011: //A0,A1 high
-                stopSearchingMode();
-                Serial.println("Turning right");
+                Serial.println("A0 edge → Back Right");
+                car.backward(50.0F);
+                delay(100);
                 car.turnRight(50.0F);
                 break;
-            case 0b1100: //A2,A3 high
+            case 0b0010: // A1 (top-left) detects edge → Move back-right
                 stopSearchingMode();
-                Serial.println("Turning left");
+                Serial.println("A1 edge → Back Right");
+                car.backward(50.0F);
+                delay(100);
+                car.turnRight(50.0F);
+                break;
+            case 0b0100: // A2 (top-right) detects edge → Move back-left
+                stopSearchingMode();
+                Serial.println("A2 edge → Back Left");
+                car.backward(50.0F);
+                delay(100);
                 car.turnLeft(50.0F);
                 break;
-            case 0b1001: //A0,A3 high
+            case 0b1000: // A3 (bottom-right) detects edge → Move back-left
                 stopSearchingMode();
-                Serial.println("Moving forward");
-                car.forward(70.0F);
+                Serial.println("A3 edge → Back Left");
+                car.backward(50.0F);
+                delay(100);
+                car.turnLeft(50.0F);
                 break;
-            case 0b0110: //A1,A2 high
+                
+            // Two sensors on same side - strong correction
+            case 0b0011: // A0+A1 (left side) → Turn hard right
                 stopSearchingMode();
-                Serial.println("Moving backward");
+                Serial.println("Left edge → Hard Right");
+                car.backward(50.0F);
+                delay(150);
+                car.turnRight(70.0F);
+                break;
+            case 0b1100: // A2+A3 (right side) → Turn hard left
+                stopSearchingMode();
+                Serial.println("Right edge → Hard Left");
+                car.backward(50.0F);
+                delay(150);
+                car.turnLeft(70.0F);
+                break;
+            case 0b0110: // A1+A2 (front) → Move backward
+                stopSearchingMode();
+                Serial.println("Front edge → Backward");
                 car.backward(70.0F);
                 break;
+            case 0b1001: // A0+A3 (back) → Move forward
+                stopSearchingMode();
+                Serial.println("Back edge → Forward");
+                car.forward(70.0F);
+                break;
+                
+            // 3+ sensors = stop immediately!
+            case 0b0111: case 0b1011: case 0b1101: case 0b1110: case 0b1111:
+                stopSearchingMode();
+                Serial.println("3+ edges → STOP!");
+                car.stop();
+                break;
+                
+            // Diagonal patterns
+            case 0b0101: // A0+A2 (diagonal)
+                stopSearchingMode();
+                Serial.println("Diagonal edge → Back");
+                car.backward(50.0F);
+                break;
+            case 0b1010: // A1+A3 (diagonal)
+                stopSearchingMode();
+                Serial.println("Diagonal edge → Back");
+                car.backward(50.0F);
+                break;
+                
+            // Other patterns
             default:
-                // start the non-blocking searching behavior
-                Serial.println("Unrecognized sensor pattern, entering searching mode");
-                startSearchingMode();
+                Serial.printf("Pattern 0b%04b\n", pattern);
+                car.forward(50.0F);
                 break;
         }
-        // Always update search mode state (non-blocking) so it can run while loop continues
-        updateSearchingMode();
     }
+    
+    // Update search mode outside sensor reading block (runs continuously when active)
+    updateSearchingMode();
 }
