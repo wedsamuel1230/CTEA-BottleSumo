@@ -106,6 +106,6 @@ private:
   uint32_t _budgetUs;
   uint8_t _preRange;
   uint8_t _finalRange;
-  const uint16_t _resetDelayMs = 300;
-  const uint16_t _postResetDelayMs = 300;
+  const uint16_t _resetDelayMs = 50;      // Wait after pulling all XSHUT LOW
+  const uint16_t _postResetDelayMs = 20;  // Wait after each sensor wakes up
 };
