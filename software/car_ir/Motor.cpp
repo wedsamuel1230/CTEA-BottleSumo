@@ -67,7 +67,7 @@ void Motor::setDuty(float speed) {
 void Motor::stop() {
   if (!_initialized) return;
   
-  pwm_set_chan_level(_slice, _channel, 0);
+  pwm_set_chan_level(_slice, _channel, _top);
   digitalWrite(_dir_pin, LOW);
 }
 

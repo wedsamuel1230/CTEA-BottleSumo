@@ -24,8 +24,9 @@ void setup() {
 
 void loop() {
   digitalWrite(LED_BUILTIN, HIGH);
-  car.turnLeft(20.0F);
-  delay(5000);
-  car.turnRight(20.0F);
-  delay(5000);
+  car.stop();
+  delay(2000);
+  digitalWrite(LED_BUILTIN, LOW);
+  car.forward(20.0F);
+  delay(2000);
 }

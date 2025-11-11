@@ -14,7 +14,8 @@ constexpr uint8_t IR_SENSOR_PINS[IR_SENSOR_CHANNELS] = {0, 1, 2, 3}; // A0 to A3
 constexpr uint8_t ADS1115_I2C_ADDRESS = 0x48;
 
 // Dynamic threshold variables
-float ir_threshold = 2.5F; // Voltage threshold for IR detection
+float ir_threshold_front = 2.5F; // Voltage threshold for A1, A2 (front sensors)
+float ir_threshold_back = 2.5F;  // Voltage threshold for A0, A3 (back sensors)
 float threshold_min = 0.0F; // Calibration: min voltage seen
 float threshold_max = 5.0F; // Calibration: max voltage seen
 bool auto_threshold_enabled = false;
@@ -108,11 +109,13 @@ void updateCalibration(float voltValues[]) {
     // Check if calibration time is up
     if (millis() - calibration_start >= CALIBRATION_DURATION_MS) {
         auto_threshold_enabled = false;
-        // Set threshold to midpoint
-        ir_threshold = (threshold_min + threshold_max) / 2.0F;
+        // Set threshold to midpoint (same for both front and back initially)
+        ir_threshold_front = (threshold_min + threshold_max) / 2.0F;
+        ir_threshold_back = (threshold_min + threshold_max) / 2.0F;
         Serial.println("\n=== CALIBRATION COMPLETE ===");
         Serial.printf("Min: %.3fV, Max: %.3fV\n", threshold_min, threshold_max);
-        Serial.printf("New Threshold: %.3fV\n", ir_threshold);
+        Serial.printf("Front Threshold (A1,A2): %.3fV\n", ir_threshold_front);
+        Serial.printf("Back Threshold (A0,A3): %.3fV\n", ir_threshold_back);
         Serial.println("============================\n");
     } else {
         // Show progress
@@ -132,19 +135,58 @@ void processSerialCommands() {
         if (cmd.equalsIgnoreCase("cal") || cmd.equalsIgnoreCase("calibrate")) {
             startCalibration();
         }
-        else if (cmd.startsWith("t+")) {
-            ir_threshold += 0.1F;
-            Serial.printf("Threshold increased to: %.3fV\n", ir_threshold);
+        else if (cmd.startsWith("f+")) { // Front threshold +
+            ir_threshold_front += 0.1F;
+            Serial.printf("Front threshold increased to: %.3fV\n", ir_threshold_front);
         }
-        else if (cmd.startsWith("t-")) {
-            ir_threshold -= 0.1F;
-            Serial.printf("Threshold decreased to: %.3fV\n", ir_threshold);
+        else if (cmd.startsWith("f-")) { // Front threshold -
+            ir_threshold_front -= 0.1F;
+            Serial.printf("Front threshold decreased to: %.3fV\n", ir_threshold_front);
         }
-        else if (cmd.startsWith("t=")) {
+        else if (cmd.startsWith("f=")) { // Front threshold set
             float newThreshold = cmd.substring(2).toFloat();
             if (newThreshold > 0 && newThreshold < 5.0F) {
-                ir_threshold = newThreshold;
-                Serial.printf("Threshold set to: %.3fV\n", ir_threshold);
+                ir_threshold_front = newThreshold;
+                Serial.printf("Front threshold set to: %.3fV\n", ir_threshold_front);
+            } else {
+                Serial.println("Invalid threshold value (must be 0-5V)");
+            }
+        }
+        else if (cmd.startsWith("b+")) { // Back threshold +
+            ir_threshold_back += 0.1F;
+            Serial.printf("Back threshold increased to: %.3fV\n", ir_threshold_back);
+        }
+        else if (cmd.startsWith("b-")) { // Back threshold -
+            ir_threshold_back -= 0.1F;
+            Serial.printf("Back threshold decreased to: %.3fV\n", ir_threshold_back);
+        }
+        else if (cmd.startsWith("b=")) { // Back threshold set
+            float newThreshold = cmd.substring(2).toFloat();
+            if (newThreshold > 0 && newThreshold < 5.0F) {
+                ir_threshold_back = newThreshold;
+                Serial.printf("Back threshold set to: %.3fV\n", ir_threshold_back);
+            } else {
+                Serial.println("Invalid threshold value (must be 0-5V)");
+            }
+        }
+        else if (cmd.startsWith("t+")) { // Both thresholds +
+            ir_threshold_front += 0.1F;
+            ir_threshold_back += 0.1F;
+            Serial.printf("Both thresholds increased - Front: %.3fV, Back: %.3fV\n", 
+                         ir_threshold_front, ir_threshold_back);
+        }
+        else if (cmd.startsWith("t-")) { // Both thresholds -
+            ir_threshold_front -= 0.1F;
+            ir_threshold_back -= 0.1F;
+            Serial.printf("Both thresholds decreased - Front: %.3fV, Back: %.3fV\n", 
+                         ir_threshold_front, ir_threshold_back);
+        }
+        else if (cmd.startsWith("t=")) { // Both thresholds set
+            float newThreshold = cmd.substring(2).toFloat();
+            if (newThreshold > 0 && newThreshold < 5.0F) {
+                ir_threshold_front = newThreshold;
+                ir_threshold_back = newThreshold;
+                Serial.printf("Both thresholds set to: %.3fV\n", ir_threshold_front);
             } else {
                 Serial.println("Invalid threshold value (must be 0-5V)");
             }
@@ -152,11 +194,19 @@ void processSerialCommands() {
         else if (cmd.equalsIgnoreCase("help") || cmd.equals("?")) {
             Serial.println("\n=== DYNAMIC THRESHOLD COMMANDS ===");
             Serial.println("cal       - Start auto-calibration (3 seconds)");
-            Serial.println("t+        - Increase threshold by 0.1V");
-            Serial.println("t-        - Decrease threshold by 0.1V");
-            Serial.println("t=X.XXX   - Set threshold to specific value");
+            Serial.println("f+        - Increase FRONT threshold by 0.1V (A1,A2)");
+            Serial.println("f-        - Decrease FRONT threshold by 0.1V (A1,A2)");
+            Serial.println("f=X.XXX   - Set FRONT threshold to specific value");
+            Serial.println("b+        - Increase BACK threshold by 0.1V (A0,A3)");
+            Serial.println("b-        - Decrease BACK threshold by 0.1V (A0,A3)");
+            Serial.println("b=X.XXX   - Set BACK threshold to specific value");
+            Serial.println("t+        - Increase BOTH thresholds by 0.1V");
+            Serial.println("t-        - Decrease BOTH thresholds by 0.1V");
+            Serial.println("t=X.XXX   - Set BOTH thresholds to specific value");
             Serial.println("help or ? - Show this menu");
-            Serial.printf("\nCurrent threshold: %.3fV\n", ir_threshold);
+            Serial.printf("\nCurrent thresholds:\n");
+            Serial.printf("  Front (A1,A2): %.3fV\n", ir_threshold_front);
+            Serial.printf("  Back (A0,A3): %.3fV\n", ir_threshold_back);
             Serial.println("==================================\n");
         }
     }
@@ -238,7 +288,8 @@ void setup(){
   // Print help on startup
   Serial.println("\n=== Dynamic Threshold Control ===");
   Serial.println("Type 'help' or '?' for commands");
-  Serial.printf("Current threshold: %.3fV\n", ir_threshold);
+  Serial.printf("Front threshold (A1,A2): %.3fV\n", ir_threshold_front);
+  Serial.printf("Back threshold (A0,A3): %.3fV\n", ir_threshold_back);
   Serial.println("=================================\n");
 }
 
@@ -272,9 +323,11 @@ void loop(){
         
         // Determine which sensors detect EDGE (voltage > threshold = out of area)
         bool edge_detected[IR_SENSOR_CHANNELS];
-        for (int i = 0; i < IR_SENSOR_CHANNELS; i++) {
-            edge_detected[i] = (voltValues[i] > ir_threshold);
-        }
+        // A0, A3 use back threshold; A1, A2 use front threshold
+        edge_detected[0] = (voltValues[0] > ir_threshold_back);  // A0 - back-left
+        edge_detected[1] = (voltValues[1] > ir_threshold_front); // A1 - front-left
+        edge_detected[2] = (voltValues[2] > ir_threshold_front); // A2 - front-right
+        edge_detected[3] = (voltValues[3] > ir_threshold_back);  // A3 - back-right
         
         // Create bit pattern: [A3][A2][A1][A0] 
         // 1 = edge detected (danger!), 0 = safe
@@ -285,8 +338,7 @@ void loop(){
         for (int i = 0; i < IR_SENSOR_CHANNELS; i++) {
             Serial.printf("A%d:%.2fV ", i, voltValues[i]);
         }
-        Serial.printf("| Thr:%.2fV | ", ir_threshold);
-        Serial.printf("| Thr:%.2fV | ", ir_threshold);
+        Serial.printf("| Thr: F:%.2fV B:%.2fV | ", ir_threshold_front, ir_threshold_back);
         
         /*
         Sensor Layout:      Bit Pattern: [A3][A2][A1][A0]

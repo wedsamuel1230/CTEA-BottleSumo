@@ -15,23 +15,23 @@ bool Car::initializeMotors(uint8_t left_pwm_pin, uint8_t left_dir_pin,
 }
 
 void Car::forward(float speed) {  // Fixed typo: was "foward"
-  leftMotor.setDuty(-speed);
-  rightMotor.setDuty(speed);
+  leftMotor.setDuty(speed);
+  rightMotor.setDuty(-speed);
 }
 
 void Car::backward(float speed) {
-  leftMotor.setDuty(speed);
-  rightMotor.setDuty(-speed);
-}
-
-void Car::turnLeft(float speed) {
-  leftMotor.setDuty(speed);
+  leftMotor.setDuty(-speed);
   rightMotor.setDuty(speed);
 }
 
-void Car::turnRight(float speed) {
+void Car::turnLeft(float speed) {
   leftMotor.setDuty(-speed);
   rightMotor.setDuty(-speed);
+}
+
+void Car::turnRight(float speed) {
+  leftMotor.setDuty(speed);
+  rightMotor.setDuty(speed);
 }
 
 void Car::stop() {
