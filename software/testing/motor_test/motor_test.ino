@@ -22,7 +22,7 @@ void setup() {
 }
 
 void loop() {
-  car.turnRight(0);
+  car.turnLeft(0);
   delay(200);
   car.stop();
 }

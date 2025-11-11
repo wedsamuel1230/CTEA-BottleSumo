@@ -30,8 +30,8 @@ void Car::turnLeft(float speed) {
 }
 
 void Car::turnRight(float speed) {
-  leftMotor.setDuty(-speed);
-  rightMotor.setDuty(-speed);
+  leftMotor.setDuty(speed);
+  rightMotor.setDuty(speed);
 }
 
 void Car::stop() {
