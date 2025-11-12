@@ -44,18 +44,24 @@
 #include "MotorTestMode.h"
 #include "SensorTestMode.h"
 
+// Forward declarations so Arduino's auto-prototyper recognizes custom types
+struct SensorData;
+struct MotorCommand;
+enum SumoAction : uint8_t;
+struct EdgeDetection;
+
 // ========== Hardware Configuration ==========
 
 //I2C pin
-constexpr uint8_t I2C_SDA = 3;
-constexpr uint8_t I2C_SCL = 2;
+constexpr uint8_t I2C_SDA = 2;
+constexpr uint8_t I2C_SCL = 3;
 
 // Button pins
-constexpr uint8_t BUTTON_TEST_MODE_PIN = 15;  // GP15
-constexpr uint8_t BUTTON_RUN_MODE_PIN = 16;   // GP16
+constexpr uint8_t BUTTON_TEST_MODE_PIN = 18;  // GP18
+constexpr uint8_t BUTTON_RUN_MODE_PIN = 28;   // GP28
 
 // ToF sensor configuration (5 sensors)
-constexpr uint8_t TOF_XSHUT_PINS[5] = {12, 11, 13, 10, 14}; // GP12, GP11, GP13, GP10, GP14
+constexpr uint8_t TOF_XSHUT_PINS[5] = {4, 5, 6, 7, 8}; // GP12, GP11, GP13, GP10, GP14
 constexpr uint8_t TOF_ADDRESSES[5] = {0x30, 0x31, 0x32, 0x33, 0x34};
 constexpr uint32_t TOF_TIMING_BUDGET_US = 50000; // 50ms per sensor for long range stable
 constexpr uint8_t TOF_VCSEL_PRE_RANGE = 14;
@@ -69,10 +75,10 @@ constexpr uint8_t ADS1115_ADDRESS = 0x48;
 constexpr uint8_t IR_SENSOR_COUNT = 4;
 
 // Motor configuration
-constexpr uint8_t MOTOR_LEFT_PWM_PIN = 6;   // GP6
-constexpr uint8_t MOTOR_LEFT_DIR_PIN = 7;   // GP7
-constexpr uint8_t MOTOR_RIGHT_PWM_PIN = 8;  // GP8
-constexpr uint8_t MOTOR_RIGHT_DIR_PIN = 9;  // GP9
+constexpr uint8_t MOTOR_LEFT_PWM_PIN = 11;   // GP6
+constexpr uint8_t MOTOR_LEFT_DIR_PIN = 12;   // GP7
+constexpr uint8_t MOTOR_RIGHT_PWM_PIN = 14;  // GP8
+constexpr uint8_t MOTOR_RIGHT_DIR_PIN = 15;  // GP9
 constexpr uint32_t MOTOR_PWM_FREQ = 20000;  // 20kHz PWM frequency
 
 // WiFi configuration
@@ -80,6 +86,31 @@ constexpr const char* AP_SSID = "BottleSumo_Robot";
 constexpr const char* AP_PASSWORD = "sumo2025";
 constexpr uint16_t TCP_PORT = 4242;
 constexpr uint8_t MAX_CLIENTS = 4;
+
+// I2C helper for diagnostics
+uint8_t detectI2CDevice(TwoWire &bus, const uint8_t *candidates, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    bus.beginTransmission(candidates[i]);
+    if (bus.endTransmission() == 0) {
+      return candidates[i];
+    }
+  }
+  return 0;
+}
+
+void scanI2CBus(TwoWire &bus, const char *label) {
+  Serial.printf("%s bus scan: ", label);
+  uint8_t found = 0;
+  for (uint8_t address = 1; address < 127; ++address) {
+    bus.beginTransmission(address);
+    if (bus.endTransmission() == 0) {
+      Serial.printf("0x%02X ", address);
+      found++;
+    }
+  }
+  if (!found) Serial.print("none");
+  Serial.printf("(%d found)\n", found);
+}
 
 // Time budgets (milliseconds)
 constexpr uint32_t BUDGET_ADS_READ = 10;
@@ -128,7 +159,7 @@ struct MotorCommand {
 };
 
 // Sumo robot state with directional edge detection
-enum SumoAction {
+enum SumoAction : uint8_t {
   SEARCH_OPPONENT,
   ATTACK_FORWARD,
   
@@ -284,13 +315,22 @@ void setup1() {
   Wire.begin();
   Wire.setClock(400000);
   initWire1();
+  scanI2CBus(Wire, "Wire");
+  scanI2CBus(Wire1, "Wire1");
   
-  // Initialize ADS1115
-  if (!ads_sampler.begin(ADS1115_ADDRESS, &Wire, GAIN_ONE, RATE_ADS1115_860SPS)) {
+  // Initialize ADS1115 on Wire1 (same bus as ToF sensors)
+  const uint8_t adsCandidates[] = {0x48, 0x49, 0x4A, 0x4B};
+  uint8_t detectedAddress = detectI2CDevice(Wire1, adsCandidates, sizeof(adsCandidates));
+  if (!detectedAddress) {
+    Serial.println("ERROR: ADS1115 not detected on Wire1 bus");
+    while(1) delay(1000);
+  }
+
+  if (!ads_sampler.begin(detectedAddress, &Wire1, GAIN_ONE, RATE_ADS1115_860SPS)) {
     Serial.println("ERROR: ADS1115 init failed");
     while(1) delay(1000);
   }
-  Serial.println("✓ ADS1115 ready");
+  Serial.printf("✓ ADS1115 ready at 0x%02X on Wire1\n", detectedAddress);
   
   // Initialize ToF array
   if (!tof_array.configure(5, TOF_XSHUT_PINS, TOF_ADDRESSES)) {

@@ -1,0 +1,31 @@
+---
+id: 0ae585d5-b902-48ab-9516-6bcb2ae9ba14
+---
+graph TB
+    subgraph "Application Layer"
+        Library[Library.ino<br/>Main Sketch]
+        Car[Car Class<br/>Differential Drive]
+    end
+    
+    subgraph "Driver Layer"
+        Motor[Motor Class<br/>PWM Control]
+    end
+    
+    subgraph "Hardware Layer - RP2040"
+        SDK[hardware/pwm.h<br/>RP2040 SDK]
+        GPIO[GPIO Pins<br/>PWM + Direction]
+        HW[H-Bridge Driver<br/>External Hardware]
+    end
+    
+    Library -->|initializeMotors<br/>forward/backward/turn| Car
+    Car -->|setDuty| Motor
+    Motor -->|pwm_set_chan_level<br/>digitalWrite| SDK
+    SDK --> GPIO
+    GPIO --> HW
+    
+    style Library fill:#e1f5ff
+    style Car fill:#b3e0ff
+    style Motor fill:#66c2ff
+    style SDK fill:#ffeb99
+    style GPIO fill:#ffe066
+    style HW fill:#ffd633

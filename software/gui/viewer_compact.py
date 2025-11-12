@@ -30,7 +30,7 @@ from tkinter import messagebox, ttk
 from typing import Any, Dict, Optional
 
 # Default connection settings (matches firmware TCP_SERVER_PORT = 4242)
-DEFAULT_HOST = "192.168.4.1"
+DEFAULT_HOST = "192.168.42.1"
 DEFAULT_PORT = 4242
 
 # Socket settings
