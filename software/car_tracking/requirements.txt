@@ -1,0 +1,2 @@
+# Requirements for Telemetry Viewer
+matplotlib>=3.5.0
