@@ -8,7 +8,7 @@ constexpr uint8_t LEFT_MOTOR_PWM_PIN = 11;
 constexpr uint8_t LEFT_MOTOR_DIR_PIN = 12;
 constexpr uint8_t RIGHT_MOTOR_PWM_PIN = 14;
 constexpr uint8_t RIGHT_MOTOR_DIR_PIN = 15;
-constexpr uint32_t MOTOR_FREQ = 20000; // 20 kHz
+constexpr uint32_t MOTOR_FREQ = 488281; // 20 kHz
 constexpr uint8_t IR_SENSOR_CHANNELS = 4;
 constexpr uint8_t IR_SENSOR_PINS[IR_SENSOR_CHANNELS] = {0, 1, 2, 3}; // A0 to A3
 constexpr uint8_t ADS1115_I2C_ADDRESS = 0x48;
@@ -21,6 +21,22 @@ float threshold_max = 5.0F; // Calibration: max voltage seen
 bool auto_threshold_enabled = false;
 unsigned long calibration_start = 0;
 const unsigned long CALIBRATION_DURATION_MS = 3000UL; // 3 seconds to calibrate
+
+// Edge detection confirmation
+uint8_t last_pattern = 0b0000;
+uint8_t pattern_confirm_count = 0;
+const uint8_t CONFIRM_THRESHOLD = 3; // Require 3 consecutive same readings
+
+// Emergency escape mode
+bool emergency_mode = false;
+unsigned long emergency_start = 0;
+const unsigned long EMERGENCY_DURATION_MS = 1000UL; // 1.5 seconds escape
+const float ESCAPE_SPEED = 50.0F; // 50% speed is enough
+
+// Auto-start configuration
+const unsigned long AUTO_START_DELAY_MS = 3000UL; // 3 second delay before auto-start
+bool auto_start_enabled = true; // Set to true for standalone operation
+unsigned long startup_time = 0;
 
 /*
 A3 (Channel 3) - Bottom-Right IR Sensor
@@ -92,7 +108,7 @@ void startCalibration() {
     Serial.println("\n=== STARTING CALIBRATION ===");
     Serial.println("Move car over white and black surfaces for 3 seconds...");
     calibration_start = millis();
-    threshold_min = 5.0F; // Reset to max
+    threshold_min = 4.10F; // Reset to max
     threshold_max = 0.0F; // Reset to min
     auto_threshold_enabled = true;
 }
@@ -145,11 +161,11 @@ void processSerialCommands() {
         }
         else if (cmd.startsWith("f=")) { // Front threshold set
             float newThreshold = cmd.substring(2).toFloat();
-            if (newThreshold > 0 && newThreshold < 5.0F) {
+            if (newThreshold > 0 && newThreshold < threshold_max) {
                 ir_threshold_front = newThreshold;
                 Serial.printf("Front threshold set to: %.3fV\n", ir_threshold_front);
             } else {
-                Serial.println("Invalid threshold value (must be 0-5V)");
+                Serial.println("Invalid threshold value (must be 0-4.1V)");
             }
         }
         else if (cmd.startsWith("b+")) { // Back threshold +
@@ -162,7 +178,7 @@ void processSerialCommands() {
         }
         else if (cmd.startsWith("b=")) { // Back threshold set
             float newThreshold = cmd.substring(2).toFloat();
-            if (newThreshold > 0 && newThreshold < 5.0F) {
+            if (newThreshold > 0 && newThreshold < threshold_max) {
                 ir_threshold_back = newThreshold;
                 Serial.printf("Back threshold set to: %.3fV\n", ir_threshold_back);
             } else {
@@ -183,12 +199,12 @@ void processSerialCommands() {
         }
         else if (cmd.startsWith("t=")) { // Both thresholds set
             float newThreshold = cmd.substring(2).toFloat();
-            if (newThreshold > 0 && newThreshold < 5.0F) {
+            if (newThreshold > 0 && newThreshold < threshold_max) {
                 ir_threshold_front = newThreshold;
                 ir_threshold_back = newThreshold;
                 Serial.printf("Both thresholds set to: %.3fV\n", ir_threshold_front);
             } else {
-                Serial.println("Invalid threshold value (must be 0-5V)");
+                Serial.println("Invalid threshold value (must be 0-4.1V)");
             }
         }
         else if (cmd.equalsIgnoreCase("help") || cmd.equals("?")) {
@@ -262,11 +278,21 @@ void updateSearchingMode() {
 
 void setup(){
   Serial.begin(115200);
-  while (!Serial)
-  {
-    delay(1);
+  
+  // For auto-start mode, don't wait for Serial
+  if (!auto_start_enabled) {
+    while (!Serial) {
+      delay(1);
+    }
+  } else {
+    delay(100); // Brief delay for serial to initialize if connected
   }
+  
   Serial.println("Car IR Sensor Control Project");
+  
+  // Record startup time
+  startup_time = millis();
+  
   Wire1.setSDA(2);
   Wire1.setSCL(3);
   Wire1.begin();
@@ -287,6 +313,10 @@ void setup(){
   
   // Print help on startup
   Serial.println("\n=== Dynamic Threshold Control ===");
+  if (auto_start_enabled) {
+    Serial.printf("AUTO-START MODE: Car will start in %d seconds\n", AUTO_START_DELAY_MS / 1000);
+    Serial.println("Disconnect USB cable after programming!");
+  }
   Serial.println("Type 'help' or '?' for commands");
   Serial.printf("Front threshold (A1,A2): %.3fV\n", ir_threshold_front);
   Serial.printf("Back threshold (A0,A3): %.3fV\n", ir_threshold_back);
@@ -300,12 +330,37 @@ void searching_mode(){
 }
 
 void loop(){
+    // Check if still in startup delay period (for auto-start mode)
+    if (auto_start_enabled && (millis() - startup_time < AUTO_START_DELAY_MS)) {
+        // Show countdown
+        static unsigned long last_countdown = 0;
+        if (millis() - last_countdown >= 1000) {
+            last_countdown = millis();
+            unsigned long remaining = (AUTO_START_DELAY_MS - (millis() - startup_time)) / 1000;
+            Serial.printf("Starting in %lu seconds...\n", remaining + 1);
+        }
+        car.stop();
+        return; // Wait for delay to complete
+    }
+    
     // Process serial commands for dynamic threshold control
     processSerialCommands();
     
+    // Check if in emergency escape mode
+    if (emergency_mode) {
+        if (millis() - emergency_start < EMERGENCY_DURATION_MS) {
+            // Continue emergency action - no sensor processing
+            return;
+        } else {
+            // Emergency complete
+            emergency_mode = false;
+            Serial.println("Emergency escape complete!");
+        }
+    }
+    
     // Read IR sensor values with non-blocking call (proper timing)
     static unsigned long lastSensorRead = 0;
-    if (millis() - lastSensorRead >= 100) { // Read every 100 ms
+    if (millis() - lastSensorRead >= 10) { // Read every 50 ms (was 100ms - now 2x faster!)
         lastSensorRead = millis();
         
         int16_t rawValues[IR_SENSOR_CHANNELS];
@@ -340,6 +395,22 @@ void loop(){
         }
         Serial.printf("| Thr: F:%.2fV B:%.2fV | ", ir_threshold_front, ir_threshold_back);
         
+        // Pattern confirmation logic - require same pattern multiple times
+        if (pattern == last_pattern && pattern != 0b0000) {
+            pattern_confirm_count++;
+        } else {
+            pattern_confirm_count = 0;
+            last_pattern = pattern;
+        }
+        
+        // Only react if pattern is confirmed OR it's safe (0b0000)
+        bool pattern_confirmed = (pattern_confirm_count >= CONFIRM_THRESHOLD) || (pattern == 0b0000);
+        
+        if (!pattern_confirmed) {
+            Serial.printf("Pattern 0b%04b (unconfirmed %d/%d)\n", pattern, pattern_confirm_count, CONFIRM_THRESHOLD);
+            return; // Wait for confirmation
+        }
+        
         /*
         Sensor Layout:      Bit Pattern: [A3][A2][A1][A0]
              Front
@@ -354,89 +425,123 @@ void loop(){
         switch (pattern) {
             case 0b0000: // All safe - move forward
                 stopSearchingMode();
+                pattern_confirm_count = 0; // Reset confirmation
                 Serial.println("Forward");
-                car.forward(70.0F);
+                car.forward(20.0F);
                 break;
                 
-            // Single sensor edge detection - back away from that edge
-            case 0b0001: // A0 (bottom-left) detects edge → Move back-right
+            // Single sensor edge detection - Turn back to safe zone (50% speed)
+            case 0b0001: // A0 (bottom-left) → Turn right back to center
                 stopSearchingMode();
-                Serial.println("A0 edge → Back Right");
-                car.backward(50.0F);
-                delay(100);
-                car.turnRight(50.0F);
+                Serial.println("A0 edge → Turn Right (50%)");
+                emergency_mode = true;
+                emergency_start = millis();
+                car.turnRight(ESCAPE_SPEED);
+                delay(1500);
                 break;
-            case 0b0010: // A1 (top-left) detects edge → Move back-right
+            case 0b0010: // A1 (top-left) → Turn right back to center
                 stopSearchingMode();
-                Serial.println("A1 edge → Back Right");
-                car.backward(50.0F);
-                delay(100);
-                car.turnRight(50.0F);
+                Serial.println("A1 edge → Turn Right (50%)");
+                emergency_mode = true;
+                emergency_start = millis();
+                car.turnRight(ESCAPE_SPEED);
+                delay(1500);
                 break;
-            case 0b0100: // A2 (top-right) detects edge → Move back-left
+            case 0b0100: // A2 (top-right) → Turn left back to center
                 stopSearchingMode();
-                Serial.println("A2 edge → Back Left");
-                car.backward(50.0F);
-                delay(100);
-                car.turnLeft(50.0F);
+                Serial.println("A2 edge → Turn Left (50%)");
+                emergency_mode = true;
+                emergency_start = millis();
+                car.turnLeft(ESCAPE_SPEED);
+                delay(1500);
                 break;
-            case 0b1000: // A3 (bottom-right) detects edge → Move back-left
+            case 0b1000: // A3 (bottom-right) → Turn left back to center
                 stopSearchingMode();
-                Serial.println("A3 edge → Back Left");
-                car.backward(50.0F);
-                delay(100);
-                car.turnLeft(50.0F);
-                break;
-                
-            // Two sensors on same side - strong correction
-            case 0b0011: // A0+A1 (left side) → Turn hard right
-                stopSearchingMode();
-                Serial.println("Left edge → Hard Right");
-                car.backward(50.0F);
-                delay(150);
-                car.turnRight(70.0F);
-                break;
-            case 0b1100: // A2+A3 (right side) → Turn hard left
-                stopSearchingMode();
-                Serial.println("Right edge → Hard Left");
-                car.backward(50.0F);
-                delay(150);
-                car.turnLeft(70.0F);
-                break;
-            case 0b0110: // A1+A2 (front) → Move backward
-                stopSearchingMode();
-                Serial.println("Front edge → Backward");
-                car.backward(70.0F);
-                break;
-            case 0b1001: // A0+A3 (back) → Move forward
-                stopSearchingMode();
-                Serial.println("Back edge → Forward");
-                car.forward(70.0F);
+                Serial.println("A3 edge → Turn Left (50%)");
+                emergency_mode = true;
+                emergency_start = millis();
+                car.turnLeft(ESCAPE_SPEED);
+                delay(1500);
                 break;
                 
-            // 3+ sensors = stop immediately!
+            // Two sensors on same side - Stronger turn back
+            case 0b0011: // A0+A1 (left side) → Strong turn right
+                stopSearchingMode();
+                Serial.println("Left edge → Strong Right (50%)");
+                emergency_mode = true;
+                emergency_start = millis();
+                car.turnRight(ESCAPE_SPEED);
+                delay(1500);
+                break;
+            case 0b1100: // A2+A3 (right side) → Strong turn left
+                stopSearchingMode();
+                Serial.println("Right edge → Strong Left (50%)");
+                emergency_mode = true;
+                emergency_start = millis();
+                car.turnLeft(ESCAPE_SPEED);
+                delay(1500);
+                break;
+            case 0b0110: // A1+A2 (front) → Backward + Turn to break loop
+                stopSearchingMode();
+                Serial.println("Front edge → Back + Turn Right");
+                emergency_mode = true;
+                emergency_start = millis();
+                car.backward(ESCAPE_SPEED);
+                delay(800);
+                car.turnRight(ESCAPE_SPEED);
+                delay(700);
+                break;
+            case 0b1001: // A0+A3 (back) → Forward + Turn to break loop
+                stopSearchingMode();
+                Serial.println("Back edge → Forward + Turn Right");
+                emergency_mode = true;
+                emergency_start = millis();
+                car.forward(ESCAPE_SPEED);
+                delay(800);
+                car.turnRight(ESCAPE_SPEED);
+                delay(700);
+                break;
+                
+            // 3+ sensors = CRITICAL - Stop then backward + turn
             case 0b0111: case 0b1011: case 0b1101: case 0b1110: case 0b1111:
                 stopSearchingMode();
-                Serial.println("3+ edges → STOP!");
+                Serial.println("CRITICAL! 3+ edges → Back + Turn");
+                emergency_mode = true;
+                emergency_start = millis();
                 car.stop();
+                delay(200);
+                car.backward(ESCAPE_SPEED);
+                delay(800);
+                car.turnRight(ESCAPE_SPEED); // Always turn right to escape
+                delay(500);
                 break;
                 
-            // Diagonal patterns
-            case 0b0101: // A0+A2 (diagonal)
+            // Diagonal patterns - Backward + Turn to reorient
+            case 0b0101: // A0+A2 (diagonal) → Back + Turn
                 stopSearchingMode();
-                Serial.println("Diagonal edge → Back");
-                car.backward(50.0F);
+                Serial.println("Diagonal edge → Back + Turn Right");
+                emergency_mode = true;
+                emergency_start = millis();
+                car.backward(ESCAPE_SPEED);
+                delay(800);
+                car.turnRight(ESCAPE_SPEED);
+                delay(700);
                 break;
-            case 0b1010: // A1+A3 (diagonal)
+            case 0b1010: // A1+A3 (diagonal) → Back + Turn
                 stopSearchingMode();
-                Serial.println("Diagonal edge → Back");
-                car.backward(50.0F);
+                Serial.println("Diagonal edge → Back + Turn Left");
+                emergency_mode = true;
+                emergency_start = millis();
+                car.backward(ESCAPE_SPEED);
+                delay(800);
+                car.turnLeft(ESCAPE_SPEED);
+                delay(700);
                 break;
                 
             // Other patterns
             default:
-                Serial.printf("Pattern 0b%04b\n", pattern);
-                car.forward(50.0F);
+                Serial.printf("Pattern 0b%04b → Slow Forward\n", pattern);
+                car.forward(0.0F);
                 break;
         }
     }

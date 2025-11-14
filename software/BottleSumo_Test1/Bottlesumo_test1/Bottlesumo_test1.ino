@@ -3,8 +3,9 @@
 #include "ToFArray.h"
 
 // Pin definitions - XSHUT pins are GP3, GP4, GP5, GP6, GP7, GP8
-const uint8_t TOF_XSHUT_PINS[5] = {8, 7, 6, 5, 4};  // GP8, GP7, GP6, GP5, GP4
-const uint8_t TOF_ADDRESSES[5] = {0x30, 0x31, 0x32, 0x33, 0x34};
+const uint8_t XSHUT_NUM = 5;
+const uint8_t TOF_XSHUT_PINS[XSHUT_NUM] = {8, 7, 6, 5, 4};  // GP8, GP7, GP6, GP5, GP4
+const uint8_t TOF_ADDRESSES[XSHUT_NUM] = {0x30, 0x31, 0x32, 0x33, 0x34};
 const uint8_t RESET_BUTTON_PIN = 18;
 
 ToFArray tof_array(&Wire1, nullptr);
@@ -50,11 +51,11 @@ void setup() {
   scanI2C();
   
   // Configure and initialize ToF sensors
-  tof_array.configure(5, TOF_XSHUT_PINS, TOF_ADDRESSES);
-  tof_array.setTiming(50000, 14, 10);  // 50ms timing budget for stable readings
+  tof_array.configure(XSHUT_NUM, TOF_XSHUT_PINS, TOF_ADDRESSES);
+  tof_array.setTiming(33000, 14, 10);  // 33ms timing budget for stable readings
   
   uint8_t online = tof_array.beginAll();
-  Serial.printf("\nToF sensors initialized: %d/5\n", online);
+  Serial.printf("\nToF sensors initialized: %d/%d\n", online, XSHUT_NUM);
   
   // Scan I2C bus after initialization
   Serial.println("\nAfter initialization:");
@@ -69,12 +70,12 @@ void loop() {
     delay(1000);
     rp2040.reboot();
   }
-  
-  ToFSample samples[5];
+
+  ToFSample samples[XSHUT_NUM];
   tof_array.readAll(samples, 30, 1500, 2);
   
   int validCount = 0;
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < XSHUT_NUM; i++) {
     if (samples[i].valid) {
       Serial.printf("S%d:%4dmm ", i, samples[i].distanceMm);
       validCount++;
