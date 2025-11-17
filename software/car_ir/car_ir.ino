@@ -34,6 +34,10 @@ unsigned long emergency_start = 0;
 const unsigned long EMERGENCY_DURATION_MS = 1500UL; // 1.5 seconds escape
 const float ESCAPE_SPEED = 50.0F; // 50% speed is enough
 
+// Back sensor emergency (drive forward until safe)
+bool back_escape_mode = false;
+const float BACK_ESCAPE_SPEED = 1.0F; // Max forward speed when rear is off the edge
+
 // Auto-start configuration
 const unsigned long AUTO_START_DELAY_MS = 3000UL; // 3 second delay before auto-start
 bool auto_start_enabled = true; // Set to true for standalone operation
@@ -490,6 +494,23 @@ void loop(){
             Serial.printf("A%d:%.2fV ", i, voltValues[i]);
         }
         Serial.printf("| Thr: F:%.2fV B:%.2fV | ", ir_threshold_front, ir_threshold_back);
+
+        const bool back_edge_active = edge_detected[0] || edge_detected[3];
+        if (back_edge_active) {
+            if (!back_escape_mode) {
+                back_escape_mode = true;
+                edge_verification_mode = false;
+                emergency_mode = false;
+                searchingActive = false;
+                searchStep = 0;
+                Serial.printf("BACK EDGE! Pattern 0b%04b → MAX FORWARD!\n", pattern);
+            }
+            car.forward(BACK_ESCAPE_SPEED);
+            return;
+        } else if (back_escape_mode) {
+            back_escape_mode = false;
+            Serial.println("Back sensors safe again — resuming normal logic");
+        }
         
         // NEW LOGIC: Immediate stop on ANY edge detection
         if (pattern != 0b0000) {
