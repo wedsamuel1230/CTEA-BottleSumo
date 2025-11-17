@@ -1,12 +1,12 @@
 /**
- * Car Tracking with Dual-Core Multi-Sensor Directional Control + WiFi Telemetry
+ * Car Tracking with Dual-Core Multi-Sensor Directional Control
  * 
  * This sketch implements autonomous object tracking using a 5-sensor ToF array
  * with RP2040 dual-core architecture and real-time TCP telemetry streaming.
  * 
  * DUAL-CORE ARCHITECTURE:
- *   Core0 (Tracking): Sensor reading + Tracking algorithm → Motor commands + Telemetry
- *   Core1 (Motor+WiFi): Motor control + WiFi AP + TCP telemetry server
+ *   Core0 (Tracking): Sensor reading + Tracking algorithm → Motor commands
+ *   Core1 (Motor): Motor control loop (PWM updates)
  * 
  * Hardware Configuration:
  *   Target: RP2040 Pico W (WiFi-enabled)
@@ -25,13 +25,6 @@
  *   I2C Bus:
  *     Wire1: SDA=GP2, SCL=GP3
  * 
- *   WiFi Telemetry:
- *     AP SSID: PicoW-CarTracker
- *     AP Password: tracking123
- *     AP IP: 192.168.4.1
- *     TCP Port: 8080
- *     Format: JSON streaming (10Hz updates)
- * 
  * Tracking Algorithm:
  *   - Multi-sensor weighted directional tracking
  *   - Calculates left vs right sensor bias
@@ -41,15 +34,13 @@
  * Performance Benefits:
  *   - Core1 motor response time: <20ms (vs ~100ms single-core)
  *   - Core0 can take full time for I2C without blocking motors
- *   - True parallelism: sensors, motors, and WiFi run simultaneously
- *   - Real-time telemetry streaming via TCP (JSON format)
+ *   - True parallelism: sensors and motors run simultaneously
  * 
  * Author: Autonomous Copilot Agent
  * Date: 2025-11-10 (Dual-Core + WiFi Telemetry)
  */
 
 #include <Wire.h>
-#include <WiFi.h>
 #include <pico/mutex.h>
 #include "Car.h"
 #include "ToFArray.h"
@@ -70,15 +61,11 @@ const uint8_t TOF_NUM = 5;
 const uint8_t TOF_XSHUT_PINS[TOF_NUM] = {8, 7, 6, 5, 4};  // GP8-GP4
 const uint8_t TOF_I2C_ADDR[TOF_NUM] = {0x30, 0x31, 0x32, 0x33, 0x34};
 const char* TOF_NAMES[TOF_NUM] = {"R45", "R23", "M0", "L23", "L45"};
+const uint16_t SENSOR_ACTION_MAX_MM[TOF_NUM] = {450, 400, 600, 400, 450};
 
 // I2C Configuration
 const uint8_t I2C_SDA = 2;  // GP2
 const uint8_t I2C_SCL = 3;  // GP3
-
-// WiFi Configuration (AP Mode)
-const char* WIFI_SSID = "PicoW-CarTracker";
-const char* WIFI_PASSWORD = "tracking123";
-const uint16_t TCP_PORT = 8080;
 
 // ============================================================================
 // TRACKING PARAMETERS
@@ -87,18 +74,25 @@ const uint16_t TCP_PORT = 8080;
 // Distance thresholds (millimeters)
 const uint16_t DETECT_MIN_MM = 50;    // Minimum detection distance
 const uint16_t DETECT_MAX_MM = 1000;   // Maximum detection distance
-const uint16_t MIDDLE_CLEAR_THRESHOLD = 100;  // Middle sensor: ≥100mm = clear to move forward
 
 // Speed parameters (0-100 range)
 const float ROTATION_SPEED = 30.0f;   // Speed for rotating to face object
 const float BIAS_DEADZONE = 0.15f;    // Deadzone for "centered" detection (0.0-1.0)
 
 // Timing (milliseconds)
-const uint32_t READ_INTERVAL = 100;   // Sensor read interval (10 Hz) - Core0
+const uint32_t READ_INTERVAL = 200;   // Sensor read interval (5 Hz) - Core0
 const uint32_t MOTOR_INTERVAL = 20;   // Motor update interval (50 Hz) - Core1
-const uint32_t TELEMETRY_INTERVAL = 100;  // Telemetry broadcast interval (10 Hz) - Core1
 const uint32_t LOST_TIMEOUT = 2000;   // Stop if no target for 2 seconds
 const uint32_t WATCHDOG_TIMEOUT = 500;  // Stop motors if Core0 unresponsive
+const uint8_t DIRECTION_CONFIRMATIONS = 3;   // Require N frames before committing a turn
+const uint16_t FRONT_ALIGNMENT_DELTA_MM = 40;  // Max distance delta between L23/R23 to treat as centered
+const uint32_t SEARCH_EXPANSION_DELAY = 8000;  // After 8s without detections, widen search envelope
+const uint16_t DETECT_MAX_SEARCH_MM = 1600;    // Absolute ceiling for search distance
+const uint16_t SEARCH_DISTANCE_STEP_MM = 150;  // Distance increment per expansion level
+const uint8_t RANGE_STATUS_BASE = 2;           // Default acceptable VL53 status
+const uint8_t RANGE_STATUS_MAX = 5;            // Max relaxed VL53 status when searching
+const uint16_t SIDE_CLOSE_PROX_MM = 250;       // Require near sensor closer than this for single-sensor action
+const uint16_t CLUSTER_DISTANCE_DELTA_MM = 120; // Max distance delta between paired sensors on same side
 
 // ============================================================================
 // INTER-CORE COMMUNICATION
@@ -116,26 +110,9 @@ struct MotorCommand {
   bool emergencyStop;   // Emergency stop flag
 };
 
-/**
- * Shared telemetry data structure (protected by mutex)
- * Written by Core0 (tracking), read by Core1 (WiFi/TCP)
- */
-struct TelemetryData {
-  uint16_t distance;      // Closest distance in mm
-  float bias;             // Direction bias (-1.0 to +1.0)
-  float speed;            // Calculated speed
-  float leftSpeed;        // Left motor speed
-  float rightSpeed;       // Right motor speed
-  uint16_t sensors[5];    // Sensor readings [R45, R23, M0, L23, L45]
-  uint32_t timestamp;     // millis() timestamp
-  bool valid;             // Data validity flag
-};
-
 // Shared data (accessed by both cores)
 static MotorCommand sharedMotorCmd = {0.0f, 0.0f, 0, false, false};
-static TelemetryData sharedTelemetry = {0, 0.0f, 0.0f, 0.0f, 0.0f, {0,0,0,0,0}, 0, false};
 static mutex_t motorCmdMutex;
-static mutex_t telemetryMutex;
 
 // ============================================================================
 // CORE-SPECIFIC OBJECTS
@@ -147,16 +124,21 @@ ToFSample tofData[TOF_NUM];
 unsigned long lastRead = 0;
 unsigned long lastDetection = 0;
 bool trackingReady = false;
+static int8_t filteredDirection = 0;
+static int8_t directionCandidate = 0;
+static uint8_t directionCandidateCount = 0;
+static uint16_t activeDetectMax = DETECT_MAX_MM;
+static uint8_t activeStatusMax = RANGE_STATUS_BASE;
+static uint8_t searchExpansionLevel = 0;
+static unsigned long lastSearchExpansion = 0;
+static bool lastSensorOnline[TOF_NUM] = {false};
+static bool lastSensorValid[TOF_NUM] = {false};
+static uint8_t lastSensorStatus[TOF_NUM] = {0xFF};
 
-// Core1 objects (Motor Control + WiFi)
+// Core1 objects (Motor Control)
 Car car;
-WiFiServer tcpServer(TCP_PORT);
-WiFiClient connectedClients[4];  // Support up to 4 simultaneous clients
-uint8_t clientCount = 0;
 unsigned long lastMotorUpdate = 0;
-unsigned long lastTelemetryBroadcast = 0;
 bool motorReady = false;
-bool wifiReady = false;
 
 // ============================================================================
 // INTER-CORE COMMUNICATION HELPERS
@@ -192,35 +174,6 @@ bool readMotorCommand(MotorCommand& cmd) {
   return cmd.valid;
 }
 
-/**
- * Send telemetry data from Core0 to Core1 (thread-safe)
- */
-void sendTelemetryData(uint16_t distance, float bias, float speed, 
-                       float leftSpeed, float rightSpeed, const ToFSample* sensors) {
-  mutex_enter_blocking(&telemetryMutex);
-  sharedTelemetry.distance = distance;
-  sharedTelemetry.bias = bias;
-  sharedTelemetry.speed = speed;
-  sharedTelemetry.leftSpeed = leftSpeed;
-  sharedTelemetry.rightSpeed = rightSpeed;
-  for (uint8_t i = 0; i < 5; i++) {
-    sharedTelemetry.sensors[i] = sensors[i].valid ? sensors[i].distanceMm : 0;
-  }
-  sharedTelemetry.timestamp = millis();
-  sharedTelemetry.valid = true;
-  mutex_exit(&telemetryMutex);
-}
-
-/**
- * Read telemetry data on Core1 (thread-safe)
- */
-bool readTelemetryData(TelemetryData& data) {
-  mutex_enter_blocking(&telemetryMutex);
-  data = sharedTelemetry;
-  mutex_exit(&telemetryMutex);
-  return data.valid;
-}
-
 // ============================================================================
 // CORE 0: TRACKING & SENSOR PROCESSING
 // ============================================================================
@@ -238,8 +191,9 @@ void setup() {
   
   // Initialize mutex for inter-core communication
   mutex_init(&motorCmdMutex);
-  mutex_init(&telemetryMutex);
-  Serial.println("[CORE0] Mutexes initialized");
+  Serial.println("[CORE0] Motor command mutex initialized");
+  resetSearchEnvelope(false);
+  lastDetection = millis();
   
   // Initialize I2C bus
   Wire1.setSDA(I2C_SDA);
@@ -272,6 +226,10 @@ void setup() {
       i, TOF_NAMES[i], TOF_XSHUT_PINS[i], TOF_I2C_ADDR[i],
       tof.isOnline(i) ? "ONLINE ✓" : "OFFLINE ✗");
   }
+
+  // Reset detection timers now that sensors are alive
+  lastDetection = millis();
+  lastSearchExpansion = lastDetection;
   
   // System ready check
   trackingReady = (tofCount >= 3);
@@ -315,14 +273,11 @@ float calculateDirectionBias(const ToFSample* samples) {
   };
   
   // Find the closest valid sensor
-  uint16_t closestDist = DETECT_MAX_MM + 1;
+  uint16_t closestDist = activeDetectMax + 1;
   int8_t closestIndex = -1;
   
   for (uint8_t i = 0; i < TOF_NUM; i++) {
-    if (samples[i].valid 
-        && samples[i].distanceMm >= DETECT_MIN_MM 
-        && samples[i].distanceMm <= DETECT_MAX_MM
-        && samples[i].distanceMm < closestDist) {
+    if (isActionableTarget(i, samples[i]) && samples[i].distanceMm < closestDist) {
       closestDist = samples[i].distanceMm;
       closestIndex = i;
     }
@@ -341,26 +296,189 @@ float calculateDirectionBias(const ToFSample* samples) {
  * Find closest valid detection distance
  * Returns: distance in mm, or 0 if no valid detection
  */
-uint16_t getClosestDistance(const ToFSample* samples) {
-  uint16_t closest = 0;
-  for (uint8_t i = 0; i < TOF_NUM; i++) {
-    if (samples[i].valid && samples[i].distanceMm >= DETECT_MIN_MM 
-                          && samples[i].distanceMm <= DETECT_MAX_MM) {
-      if (closest == 0 || samples[i].distanceMm < closest) {
-        closest = samples[i].distanceMm;
-      }
-    }
-  }
-  return closest;
+bool isValidTarget(const ToFSample& sample) {
+  return sample.valid && sample.distanceMm >= DETECT_MIN_MM && sample.distanceMm <= activeDetectMax;
 }
 
-/**
- * Calculate speed based on middle sensor
- * Modified: Always return 0 (no forward movement, only rotation)
- */
-float calculateSpeed(const ToFSample& middleSensor) {
-  // Don't move forward - only rotate to face object
-  return 0.0f;
+bool isActionableTarget(uint8_t sensorIndex, const ToFSample& sample) {
+  if (!isValidTarget(sample)) {
+    return false;
+  }
+  uint16_t cap = SENSOR_ACTION_MAX_MM[sensorIndex];
+  return sample.distanceMm <= cap;
+}
+
+bool detectSideCluster(bool leftSide, const ToFSample* samples, uint16_t& representativeDistance) {
+  const uint8_t nearIdx = leftSide ? 3 : 1;  // 23° sensors
+  const uint8_t farIdx = leftSide ? 4 : 0;   // 45° sensors
+  const ToFSample& nearSample = samples[nearIdx];
+  const ToFSample& farSample = samples[farIdx];
+
+  bool nearActionable = isActionableTarget(nearIdx, nearSample);
+  bool farActionable = isActionableTarget(farIdx, farSample);
+
+  if (nearActionable && nearSample.distanceMm <= SIDE_CLOSE_PROX_MM) {
+    representativeDistance = nearSample.distanceMm;
+    return true;  // Near sensor sees a close object on its own
+  }
+
+  if (nearActionable && farActionable) {
+    uint16_t diff = static_cast<uint16_t>(abs(static_cast<int32_t>(nearSample.distanceMm) -
+                                              static_cast<int32_t>(farSample.distanceMm)));
+    if (diff <= CLUSTER_DISTANCE_DELTA_MM) {
+      representativeDistance = (nearSample.distanceMm + farSample.distanceMm) / 2;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool detectFrontAlignment(const ToFSample* samples, uint16_t& representativeDistance) {
+  const ToFSample& right23 = samples[1];
+  const ToFSample& left23 = samples[3];
+  if (!isValidTarget(right23) || !isValidTarget(left23)) {
+    return false;
+  }
+
+  int32_t diff = static_cast<int32_t>(right23.distanceMm) - static_cast<int32_t>(left23.distanceMm);
+  if (diff < 0) {
+    diff = -diff;
+  }
+
+  if (static_cast<uint32_t>(diff) > FRONT_ALIGNMENT_DELTA_MM) {
+    return false;
+  }
+
+  representativeDistance = (right23.distanceMm + left23.distanceMm) / 2;
+  return true;
+}
+
+const char* rangeStatusToString(uint8_t status) {
+  switch (status) {
+    case 0: return "RangeValid";
+    case 1: return "SigmaFail";
+    case 2: return "SignalFail";
+    case 3: return "MinRangeClipped";
+    case 4: return "PhaseFail";
+    case 5: return "HardwareFail";
+    case 6: return "NoUpdate";
+    case 7: return "WrappedTargetFail";
+    case 0xFF: return "Offline";
+    default: return "Unknown";
+  }
+}
+
+void updateActiveSearchEnvelope() {
+  uint32_t expanded = DETECT_MAX_MM + static_cast<uint32_t>(searchExpansionLevel) * SEARCH_DISTANCE_STEP_MM;
+  if (expanded > DETECT_MAX_SEARCH_MM) {
+    expanded = DETECT_MAX_SEARCH_MM;
+  }
+  activeDetectMax = static_cast<uint16_t>(expanded);
+
+  uint8_t statusCap = RANGE_STATUS_BASE + searchExpansionLevel;
+  if (statusCap > RANGE_STATUS_MAX) {
+    statusCap = RANGE_STATUS_MAX;
+  }
+  activeStatusMax = statusCap;
+}
+
+void resetSearchEnvelope(bool logReset) {
+  bool changed = (searchExpansionLevel != 0) || logReset;
+  searchExpansionLevel = 0;
+  updateActiveSearchEnvelope();
+  lastSearchExpansion = millis();
+  if (changed) {
+    Serial.printf("[CORE0] Search envelope reset: maxDist=%umm status<=%u\n", activeDetectMax, activeStatusMax);
+  }
+}
+
+void maybeExpandSearchEnvelope(unsigned long now) {
+  if (now - lastSearchExpansion < SEARCH_EXPANSION_DELAY) {
+    return;
+  }
+
+  unsigned long sinceLastDetection = (lastDetection == 0) ? now : (now - lastDetection);
+  if (sinceLastDetection < SEARCH_EXPANSION_DELAY) {
+    return;
+  }
+
+  if (activeDetectMax >= DETECT_MAX_SEARCH_MM && activeStatusMax >= RANGE_STATUS_MAX) {
+    return;
+  }
+
+  searchExpansionLevel++;
+  updateActiveSearchEnvelope();
+  lastSearchExpansion = now;
+  Serial.printf("[CORE0] Search envelope expanded: level=%u maxDist=%umm status<=%u\n",
+                searchExpansionLevel, activeDetectMax, activeStatusMax);
+}
+
+void reportToFStatus(const ToFSample* samples) {
+  for (uint8_t i = 0; i < TOF_NUM; ++i) {
+    bool online = tof.isOnline(i);
+    if (!online) {
+      if (lastSensorOnline[i]) {
+        Serial.printf("[TOF] %s went OFFLINE\n", TOF_NAMES[i]);
+      }
+      lastSensorOnline[i] = false;
+      lastSensorValid[i] = false;
+      lastSensorStatus[i] = 0xFF;
+      continue;
+    }
+
+    if (!lastSensorOnline[i]) {
+      Serial.printf("[TOF] %s back ONLINE\n", TOF_NAMES[i]);
+    }
+    lastSensorOnline[i] = true;
+
+    if (samples[i].valid) {
+      if (!lastSensorValid[i]) {
+        Serial.printf("[TOF] %s recovered (dist=%umm)\n", TOF_NAMES[i], samples[i].distanceMm);
+      }
+      lastSensorValid[i] = true;
+      lastSensorStatus[i] = samples[i].status;
+      continue;
+    }
+
+    if (!lastSensorValid[i] || samples[i].status != lastSensorStatus[i]) {
+      Serial.printf("[TOF] %s invalid: status=%u (%s)\n", TOF_NAMES[i], samples[i].status,
+                    rangeStatusToString(samples[i].status));
+    }
+    lastSensorValid[i] = false;
+    lastSensorStatus[i] = samples[i].status;
+  }
+}
+
+void resetDirectionFilter() {
+  filteredDirection = 0;
+  directionCandidate = 0;
+  directionCandidateCount = 0;
+}
+
+int8_t updateDirectionFilter(int8_t desiredDirection) {
+  if (desiredDirection == 0) {
+    resetDirectionFilter();
+    return 0;
+  }
+
+  if (desiredDirection == directionCandidate) {
+    if (directionCandidateCount < DIRECTION_CONFIRMATIONS) {
+      directionCandidateCount++;
+    }
+  } else {
+    directionCandidate = desiredDirection;
+    directionCandidateCount = 1;
+  }
+
+  if (directionCandidateCount >= DIRECTION_CONFIRMATIONS) {
+    filteredDirection = directionCandidate;
+    directionCandidateCount = DIRECTION_CONFIRMATIONS;  // Clamp to avoid overflow
+  } else {
+    filteredDirection = 0;
+  }
+
+  return filteredDirection;
 }
 
 /**
@@ -368,86 +486,119 @@ float calculateSpeed(const ToFSample& middleSensor) {
  * Modified: Rotate in place to face object, show direction in serial
  */
 void processTracking(const ToFSample* samples) {
-  // Check middle sensor (index 2) for forward detection
-  const ToFSample& middleSensor = samples[2];
-  
-  // Calculate steering direction from side sensors
+  // Calculate steering direction from side sensors (actionable-only)
   float directionBias = calculateDirectionBias(samples);
-  
-  // Check if we detect any object
-  bool objectDetected = false;
+
+  bool hasValidEcho = false;
   for (uint8_t i = 0; i < TOF_NUM; i++) {
-    if (samples[i].valid && samples[i].distanceMm >= DETECT_MIN_MM 
-                          && samples[i].distanceMm <= DETECT_MAX_MM) {
-      objectDetected = true;
+    if (isValidTarget(samples[i])) {
+      hasValidEcho = true;
       break;
     }
   }
-  
-  if (objectDetected) {
+
+  uint16_t leftClusterDistance = 0;
+  uint16_t rightClusterDistance = 0;
+  bool leftCluster = detectSideCluster(true, samples, leftClusterDistance);
+  bool rightCluster = detectSideCluster(false, samples, rightClusterDistance);
+  bool frontClose = isActionableTarget(2, samples[2]);
+  bool actionableTarget = frontClose || leftCluster || rightCluster;
+
+  if (actionableTarget) {
     lastDetection = millis();
-    
-    // Find closest object for display
-    uint16_t closestDist = DETECT_MAX_MM + 1;
+    if (searchExpansionLevel > 0) {
+      resetSearchEnvelope(true);
+    }
+
+    // Find closest actionable object for display
+    uint16_t closestDist = activeDetectMax + 1;
     const char* closestSensor = "---";
     for (uint8_t i = 0; i < TOF_NUM; i++) {
-      if (samples[i].valid 
-          && samples[i].distanceMm >= DETECT_MIN_MM 
-          && samples[i].distanceMm <= DETECT_MAX_MM
-          && samples[i].distanceMm < closestDist) {
+      if (isActionableTarget(i, samples[i]) && samples[i].distanceMm < closestDist) {
         closestDist = samples[i].distanceMm;
         closestSensor = TOF_NAMES[i];
       }
     }
-    
+
+    uint16_t frontDistance = 0;
+    bool frontAligned = detectFrontAlignment(samples, frontDistance);
+
+    int8_t desiredDirection = 0;
+    if (leftCluster && !rightCluster) {
+      desiredDirection = 1;
+    } else if (rightCluster && !leftCluster) {
+      desiredDirection = -1;
+    } else if (leftCluster && rightCluster) {
+      desiredDirection = (leftClusterDistance <= rightClusterDistance) ? 1 : -1;
+    } else if (!frontClose) {
+      if (directionBias > BIAS_DEADZONE) {
+        desiredDirection = 1;
+      } else if (directionBias < -BIAS_DEADZONE) {
+        desiredDirection = -1;
+      }
+    }
+
+    int8_t filtered = updateDirectionFilter(frontAligned ? 0 : desiredDirection);
+    bool validatingTurn = (!frontAligned && desiredDirection != 0 && filtered == 0);
+
     float leftSpeed = 0.0f;
     float rightSpeed = 0.0f;
-    const char* direction = "CENTERED";
-    
-    // Rotate in place to face object
-    if (directionBias > BIAS_DEADZONE) {
-      // Object on LEFT - rotate left (left backward, right forward)
+    const char* direction = "✓ CENTERED";
+
+    if (frontAligned || frontClose) {
+      direction = frontAligned ? "◎ FRONT HOLD" : "◎ FRONT DETECT";
+      leftSpeed = 0.0f;
+      rightSpeed = 0.0f;
+      resetDirectionFilter();
+    } else if (filtered > 0) {
       leftSpeed = -ROTATION_SPEED;
       rightSpeed = -ROTATION_SPEED;
       direction = "← TURN LEFT";
-    } else if (directionBias < -BIAS_DEADZONE) {
-      // Object on RIGHT - rotate right (left forward, right backward)
+    } else if (filtered < 0) {
       leftSpeed = ROTATION_SPEED;
       rightSpeed = ROTATION_SPEED;
       direction = "TURN RIGHT →";
-    } else {
-      // Object is centered - stop
-      leftSpeed = 0.0f;
-      rightSpeed = 0.0f;
-      direction = "✓ CENTERED";
+    } else if (validatingTurn) {
+      direction = "... VALIDATING";
     }
-    
+
     // Send motor commands to Core1
     sendMotorCommand(leftSpeed, rightSpeed, false);
-    
-    // Send telemetry data to Core1 for TCP streaming
-    uint16_t middleDist = middleSensor.valid ? middleSensor.distanceMm : 0;
-    sendTelemetryData(middleDist, directionBias, 0.0f, leftSpeed, rightSpeed, samples);
-    
+
     // Debug output with direction and closest sensor
-    Serial.printf("[CORE0] Direction: %-15s | Closest: %s=%4dmm | bias=%+.2f L=%+.1f R=%+.1f | ", 
-                  direction, closestSensor, closestDist, directionBias, leftSpeed, rightSpeed);
-    
+    Serial.printf("[CORE0] Direction: %-15s | Closest: %s=%4dmm | bias=%+.2f L=%+.1f R=%+.1f | confirm=%u/%u | front=%s | actionable=%s | searchLvl=%u | clusters L=%s(%u) R=%s(%u)",
+                  direction, closestSensor, closestDist, directionBias, leftSpeed, rightSpeed,
+                  directionCandidateCount, DIRECTION_CONFIRMATIONS,
+                  frontAligned ? "Y" : (frontClose ? "NEAR" : "N"),
+                  actionableTarget ? "Y" : "N",
+                  searchExpansionLevel,
+                  leftCluster ? "Y" : "N", leftCluster ? leftClusterDistance : 0,
+                  rightCluster ? "Y" : "N", rightCluster ? rightClusterDistance : 0);
+    if (frontAligned) {
+      Serial.printf("(%3dmm)", frontDistance);
+    }
+    Serial.print(" | ");
+
+  } else if (hasValidEcho) {
+    // Echo detected but deemed non-actionable (wall/noise)
+    resetDirectionFilter();
+    sendMotorCommand(0.0f, 0.0f, false);
+    Serial.printf("[CORE0] HOLD (wall/noise) | actionable=N echo=Y | searchLvl=%u | ", searchExpansionLevel);
+
   } else {
-    // No object detected
+    // No object detected at all
+    resetDirectionFilter();
     if (millis() - lastDetection > LOST_TIMEOUT) {
       // Lost for too long - emergency stop
       sendMotorCommand(0.0f, 0.0f, true);
-      sendTelemetryData(0, 0.0f, 0.0f, 0.0f, 0.0f, samples);
       Serial.print("[CORE0] NO OBJECT (stopped) | ");
     } else {
       // Recently lost - stop and wait
       sendMotorCommand(0.0f, 0.0f, false);
-      sendTelemetryData(0, 0.0f, 0.0f, 0.0f, 0.0f, samples);
       Serial.print("[CORE0] SEARCHING...        | ");
     }
   }
-  
+
   // Print sensor readings
   for (uint8_t i = 0; i < TOF_NUM; i++) {
     Serial.printf("%s:", TOF_NAMES[i]);
@@ -477,9 +628,11 @@ void loop() {
   // Read sensors at fixed interval (non-blocking)
   if (now - lastRead >= READ_INTERVAL) {
     lastRead = now;
+    maybeExpandSearchEnvelope(now);
     
     // Read all ToF sensors (this may take ~33ms, but Core1 keeps running)
-    tof.readAll(tofData, DETECT_MIN_MM, DETECT_MAX_MM, 2);
+    tof.readAll(tofData, DETECT_MIN_MM, activeDetectMax, activeStatusMax);
+    reportToFStatus(tofData);
     
     // Process tracking logic and send commands to Core1
     processTracking(tofData);
@@ -490,83 +643,18 @@ void loop() {
 }
 
 // ============================================================================
-// CORE 1: MOTOR CONTROL, WiFi & TCP TELEMETRY
+// CORE 1: MOTOR CONTROL
 // ============================================================================
 
 /**
- * Serialize telemetry data to JSON string
- */
-void serializeTelemetryJSON(char* buffer, size_t bufferSize, const TelemetryData& data) {
-  snprintf(buffer, bufferSize,
-    "{\"dist\":%u,\"bias\":%.2f,\"speed\":%.1f,\"left\":%.1f,\"right\":%.1f,"
-    "\"R45\":%u,\"R23\":%u,\"M0\":%u,\"L23\":%u,\"L45\":%u,\"timestamp\":%lu}\n",
-    data.distance, data.bias, data.speed, data.leftSpeed, data.rightSpeed,
-    data.sensors[0], data.sensors[1], data.sensors[2], data.sensors[3], data.sensors[4],
-    data.timestamp
-  );
-}
-
-/**
- * Handle TCP clients (accept new, remove disconnected, broadcast telemetry)
- */
-void handleTCPClients() {
-  // Accept new client connections
-  WiFiClient newClient = tcpServer.available();
-  if (newClient) {
-    // Find empty slot
-    bool added = false;
-    for (uint8_t i = 0; i < 4; i++) {
-      if (!connectedClients[i] || !connectedClients[i].connected()) {
-        connectedClients[i] = newClient;
-        clientCount++;
-        Serial.printf("[CORE1] TCP client %d connected (total: %d)\n", i, clientCount);
-        added = true;
-        break;
-      }
-    }
-    if (!added) {
-      newClient.stop();  // Max clients reached
-      Serial.println("[CORE1] TCP client rejected (max clients reached)");
-    }
-  }
-  
-  // Remove disconnected clients
-  for (uint8_t i = 0; i < 4; i++) {
-    if (connectedClients[i] && !connectedClients[i].connected()) {
-      connectedClients[i].stop();
-      connectedClients[i] = WiFiClient();  // Reset
-      if (clientCount > 0) clientCount--;
-      Serial.printf("[CORE1] TCP client %d disconnected (total: %d)\n", i, clientCount);
-    }
-  }
-}
-
-/**
- * Broadcast telemetry JSON to all connected TCP clients
- */
-void broadcastTelemetry(const TelemetryData& data) {
-  if (clientCount == 0) return;  // No clients, skip
-  
-  char jsonBuffer[256];
-  serializeTelemetryJSON(jsonBuffer, sizeof(jsonBuffer), data);
-  
-  // Send to all connected clients
-  for (uint8_t i = 0; i < 4; i++) {
-    if (connectedClients[i] && connectedClients[i].connected()) {
-      connectedClients[i].print(jsonBuffer);
-    }
-  }
-}
-
-/**
- * Core1 Setup - Initialize motors + WiFi AP + TCP server
+ * Core1 Setup - Initialize motors
  * Runs on Core1 after Core0 setup() completes
  */
 void setup1() {
   // Small delay to let Core0 initialize mutexes first
   delay(500);
   
-  Serial.println("[CORE1] Motor control + WiFi core starting...");
+  Serial.println("[CORE1] Motor control core starting...");
   
   // Initialize motors
   Serial.println("[CORE1] Initializing motors...");
@@ -583,31 +671,14 @@ void setup1() {
     return;
   }
   
-  // Initialize WiFi AP mode
-  Serial.println("\n[CORE1] Starting WiFi Access Point...");
-  Serial.printf("[CORE1]   SSID: %s\n", WIFI_SSID);
-  Serial.printf("[CORE1]   Password: %s\n", WIFI_PASSWORD);
-  
-  WiFi.mode(WIFI_AP);
-  if (WiFi.softAP(WIFI_SSID, WIFI_PASSWORD)) {
-    IPAddress IP = WiFi.softAPIP();
-    Serial.print("[CORE1] ✓ WiFi AP started at IP: ");
-    Serial.println(IP);
-    wifiReady = true;
-  } else {
-    Serial.println("[CORE1] ✗ WiFi AP FAILED to start!");
-    wifiReady = false;
-  }
-  
-  // Start TCP server
-  if (wifiReady) {
-    tcpServer.begin();
-    Serial.printf("[CORE1] ✓ TCP telemetry server listening on port %d\n", TCP_PORT);
-    Serial.println("[CORE1]   Clients can connect to: 192.168.4.1:8080");
-    Serial.println("[CORE1]   JSON telemetry streaming enabled (10Hz)\n");
-  }
-  
-  Serial.println("[CORE1] ✓ Core1 operational (50Hz motor + 10Hz telemetry)\n");
+  Serial.println("[CORE1] ✓ Core1 operational (50Hz motor loop)\n");
+  Serial.println();
+  car.forward(1);
+  delay(2300);
+  car.turnRight(ROTATION_SPEED);
+  delay(300);
+  car.forward(1);
+  delay(1000);
 }
 
 /**
@@ -641,20 +712,6 @@ void loop1() {
       // Watchdog timeout or no valid command - safety stop
       car.stop();
       // Note: Don't spam serial, this runs at 50Hz
-    }
-  }
-  
-  // Handle TCP clients and broadcast telemetry at fixed interval (10 Hz)
-  if (wifiReady && (now - lastTelemetryBroadcast >= TELEMETRY_INTERVAL)) {
-    lastTelemetryBroadcast = now;
-    
-    // Handle new/disconnected clients
-    handleTCPClients();
-    
-    // Read telemetry data from Core0 and broadcast to clients
-    TelemetryData telemetry;
-    if (readTelemetryData(telemetry)) {
-      broadcastTelemetry(telemetry);
     }
   }
   

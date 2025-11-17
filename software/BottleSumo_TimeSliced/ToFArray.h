@@ -1,6 +1,8 @@
 // Scalable VL53L0X array manager (up to 5 sensors) with XSHUT control
 #pragma once
 
+#include <stdint.h>
+
 #ifdef ARDUINO
 #include <Adafruit_VL53L0X.h>
 #include <Wire.h>
@@ -18,7 +20,22 @@ public:
   void setMeasurementTimingBudgetMicroSeconds(uint32_t) {}
   void setVcselPulsePeriod(uint8_t, uint8_t) {}
   void rangingTest(VL53L0X_RangingMeasurementData_t*, bool) {}
+  void setAddress(uint8_t) {}
 };
+inline void pinMode(uint8_t, uint8_t) {}
+inline void digitalWrite(uint8_t, uint8_t) {}
+inline void delay(uint32_t) {}
+inline void mutex_enter_blocking(mutex_t*) {}
+inline void mutex_exit(mutex_t*) {}
+constexpr uint8_t OUTPUT = 1;
+constexpr uint8_t LOW = 0;
+constexpr uint8_t HIGH = 1;
+#ifndef VL53L0X_VCSEL_PERIOD_PRE_RANGE
+#define VL53L0X_VCSEL_PERIOD_PRE_RANGE 0
+#endif
+#ifndef VL53L0X_VCSEL_PERIOD_FINAL_RANGE
+#define VL53L0X_VCSEL_PERIOD_FINAL_RANGE 1
+#endif
 #endif
 
 struct ToFSample {
@@ -31,7 +48,7 @@ class ToFArray {
 public:
   // Construct with external Wire bus and optional mutex for arbitration
   ToFArray(TwoWire* wire, mutex_t* wireMutex)
-    : _wire(wire ? wire : &Wire), _wireMutex(wireMutex), _count(0), _budgetUs(33000), _preRange(14), _finalRange(10) {}
+    : _wire(resolveWire(wire)), _wireMutex(wireMutex), _count(0), _budgetUs(33000), _preRange(14), _finalRange(10) {}
 
   // Configure sensors: count (<=5), arrays of xshut pins and I2C addresses
   bool configure(uint8_t count, const uint8_t* xshutPins, const uint8_t* i2cAddresses) {
@@ -59,9 +76,13 @@ public:
     for (uint8_t i = 0; i < _count; ++i) {
       digitalWrite(_xshut[i], HIGH);
       delay(_postResetDelayMs);
-      if (!_lox[i].begin(_addr[i], false, _wire)) {
+      if (!_lox[i].begin(DefaultAddress, false, _wire)) {
         _online[i] = false;
         continue;
+      }
+      if (_addr[i] != DefaultAddress) {
+        _lox[i].setAddress(_addr[i]);
+        delay(5);
       }
       _lox[i].setMeasurementTimingBudgetMicroSeconds(_budgetUs);
       _lox[i].setVcselPulsePeriod(VL53L0X_VCSEL_PERIOD_PRE_RANGE, _preRange);
@@ -108,4 +129,14 @@ private:
   uint8_t _finalRange;
   const uint16_t _resetDelayMs = 50;
   const uint16_t _postResetDelayMs = 20;
+  static constexpr uint8_t DefaultAddress = 0x29;
+
+  static TwoWire* resolveWire(TwoWire* preferred) {
+#ifdef ARDUINO
+    return preferred ? preferred : &Wire;
+#else
+    static TwoWire fallbackWire;
+    return preferred ? preferred : &fallbackWire;
+#endif
+  }
 };
