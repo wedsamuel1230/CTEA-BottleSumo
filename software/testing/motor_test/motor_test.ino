@@ -27,6 +27,6 @@ void loop() {
   car.stop();
   delay(2000);
   digitalWrite(LED_BUILTIN, LOW);
-  car.forward(20.0F);
+  car.forward(0.0F);
   delay(2000);
 }
