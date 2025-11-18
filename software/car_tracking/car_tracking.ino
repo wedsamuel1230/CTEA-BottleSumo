@@ -76,15 +76,15 @@ const uint16_t DETECT_MIN_MM = 50;    // Minimum detection distance
 const uint16_t DETECT_MAX_MM = 1000;   // Maximum detection distance
 
 // Speed parameters (0-100 range)
-const float ROTATION_SPEED = 30.0f;   // Speed for rotating to face object
-const float BIAS_DEADZONE = 0.15f;    // Deadzone for "centered" detection (0.0-1.0)
+const float ROTATION_SPEED = 40.0f;   // Speed for rotating to face object
+const float BIAS_DEADZONE = 0.25f;    // Deadzone for "centered" detection (0.0-1.0)
 
 // Timing (milliseconds)
 const uint32_t READ_INTERVAL = 200;   // Sensor read interval (5 Hz) - Core0
 const uint32_t MOTOR_INTERVAL = 20;   // Motor update interval (50 Hz) - Core1
 const uint32_t LOST_TIMEOUT = 2000;   // Stop if no target for 2 seconds
 const uint32_t WATCHDOG_TIMEOUT = 500;  // Stop motors if Core0 unresponsive
-const uint8_t DIRECTION_CONFIRMATIONS = 3;   // Require N frames before committing a turn
+const uint8_t DIRECTION_CONFIRMATIONS = 2;   // Require N frames before committing a turn
 const uint16_t FRONT_ALIGNMENT_DELTA_MM = 40;  // Max distance delta between L23/R23 to treat as centered
 const uint32_t SEARCH_EXPANSION_DELAY = 8000;  // After 8s without detections, widen search envelope
 const uint16_t DETECT_MAX_SEARCH_MM = 1600;    // Absolute ceiling for search distance
@@ -93,6 +93,7 @@ const uint8_t RANGE_STATUS_BASE = 2;           // Default acceptable VL53 status
 const uint8_t RANGE_STATUS_MAX = 5;            // Max relaxed VL53 status when searching
 const uint16_t SIDE_CLOSE_PROX_MM = 250;       // Require near sensor closer than this for single-sensor action
 const uint16_t CLUSTER_DISTANCE_DELTA_MM = 120; // Max distance delta between paired sensors on same side
+const uint8_t SIDE_CONFIRM_FRAMES = 1;         // Frames required when only one sensor sees target
 
 // ============================================================================
 // INTER-CORE COMMUNICATION
@@ -134,6 +135,8 @@ static unsigned long lastSearchExpansion = 0;
 static bool lastSensorOnline[TOF_NUM] = {false};
 static bool lastSensorValid[TOF_NUM] = {false};
 static uint8_t lastSensorStatus[TOF_NUM] = {0xFF};
+static uint8_t leftConsistencyFrames = 0;
+static uint8_t rightConsistencyFrames = 0;
 
 // Core1 objects (Motor Control)
 Car car;
@@ -267,7 +270,7 @@ float calculateDirectionBias(const ToFSample* samples) {
   const float weights[TOF_NUM] = {
     -1.0f,  // R45 (index 0) - far right
     -0.5f,  // R23 (index 1) - near right
-     0.0f,  // M0  (index 2) - center
+    0.0f,  // M0  (index 2) - center
     +0.5f,  // L23 (index 3) - near left
     +1.0f   // L45 (index 4) - far left
   };
@@ -316,22 +319,60 @@ bool detectSideCluster(bool leftSide, const ToFSample* samples, uint16_t& repres
 
   bool nearActionable = isActionableTarget(nearIdx, nearSample);
   bool farActionable = isActionableTarget(farIdx, farSample);
+  uint16_t candidateDist = activeDetectMax + 1;
 
   if (nearActionable && nearSample.distanceMm <= SIDE_CLOSE_PROX_MM) {
-    representativeDistance = nearSample.distanceMm;
-    return true;  // Near sensor sees a close object on its own
-  }
-
-  if (nearActionable && farActionable) {
+    candidateDist = nearSample.distanceMm;
+    if (leftSide) {
+      leftConsistencyFrames = SIDE_CONFIRM_FRAMES;
+    } else {
+      rightConsistencyFrames = SIDE_CONFIRM_FRAMES;
+    }
+  } else if (nearActionable && farActionable) {
     uint16_t diff = static_cast<uint16_t>(abs(static_cast<int32_t>(nearSample.distanceMm) -
                                               static_cast<int32_t>(farSample.distanceMm)));
     if (diff <= CLUSTER_DISTANCE_DELTA_MM) {
-      representativeDistance = (nearSample.distanceMm + farSample.distanceMm) / 2;
-      return true;
+      candidateDist = (nearSample.distanceMm + farSample.distanceMm) / 2;
+    } else {
+      candidateDist = min(nearSample.distanceMm, farSample.distanceMm);
     }
+    if (leftSide) {
+      leftConsistencyFrames = SIDE_CONFIRM_FRAMES;
+    } else {
+      rightConsistencyFrames = SIDE_CONFIRM_FRAMES;
+    }
+  } else if (nearActionable || farActionable) {
+    candidateDist = nearActionable ? nearSample.distanceMm : farSample.distanceMm;
+    if (leftSide) {
+      if (leftConsistencyFrames < SIDE_CONFIRM_FRAMES) {
+        leftConsistencyFrames++;
+      }
+    } else {
+      if (rightConsistencyFrames < SIDE_CONFIRM_FRAMES) {
+        rightConsistencyFrames++;
+      }
+    }
+    bool confirmed = leftSide ? (leftConsistencyFrames >= SIDE_CONFIRM_FRAMES)
+                              : (rightConsistencyFrames >= SIDE_CONFIRM_FRAMES);
+    if (!confirmed) {
+      return false;
+    }
+  } else {
+    if (leftSide) {
+      leftConsistencyFrames = 0;
+    } else {
+      rightConsistencyFrames = 0;
+    }
+    return false;
   }
 
-  return false;
+  representativeDistance = candidateDist;
+  if (leftSide) {
+    leftConsistencyFrames = SIDE_CONFIRM_FRAMES;  // lock once confirmed
+  } else {
+    rightConsistencyFrames = SIDE_CONFIRM_FRAMES;
+  }
+  return true;
 }
 
 bool detectFrontAlignment(const ToFSample* samples, uint16_t& representativeDistance) {
@@ -547,8 +588,8 @@ void processTracking(const ToFSample* samples) {
 
     if (frontAligned || frontClose) {
       direction = frontAligned ? "◎ FRONT HOLD" : "◎ FRONT DETECT";
-      leftSpeed = 0.0f;
-      rightSpeed = 0.0f;
+      leftSpeed = 100.0f;
+      rightSpeed = -100.0f;
       resetDirectionFilter();
     } else if (filtered > 0) {
       leftSpeed = -ROTATION_SPEED;
@@ -594,7 +635,7 @@ void processTracking(const ToFSample* samples) {
       Serial.print("[CORE0] NO OBJECT (stopped) | ");
     } else {
       // Recently lost - stop and wait
-      sendMotorCommand(0.0f, 0.0f, false);
+      sendMotorCommand(100.0f, 100.0f, false);
       Serial.print("[CORE0] SEARCHING...        | ");
     }
   }
@@ -616,13 +657,6 @@ void processTracking(const ToFSample* samples) {
 // ============================================================================
 
 void loop() {
-  if (!trackingReady) {
-    // System initialization failed - send emergency stop
-    sendMotorCommand(0.0f, 0.0f, true);
-    delay(1000);
-    return;
-  }
-  
   unsigned long now = millis();
   
   // Read sensors at fixed interval (non-blocking)
@@ -665,6 +699,7 @@ void setup1() {
     Serial.printf("[CORE1]   Left:  PWM=GP%d, DIR=GP%d\n", LEFT_MOTOR_PWM, LEFT_MOTOR_DIR);
     Serial.printf("[CORE1]   Right: PWM=GP%d, DIR=GP%d\n", RIGHT_MOTOR_PWM, RIGHT_MOTOR_DIR);
     motorReady = true;
+    car.stop();  // Ensure motors are stopped at start
   } else {
     Serial.println("[CORE1] ✗ MOTOR INIT FAILED - Check pin assignments!");
     motorReady = false;
@@ -673,12 +708,15 @@ void setup1() {
   
   Serial.println("[CORE1] ✓ Core1 operational (50Hz motor loop)\n");
   Serial.println();
+  /*
   car.forward(1);
   delay(2300);
   car.turnRight(ROTATION_SPEED);
   delay(300);
   car.forward(1);
-  delay(1000);
+  delay(1000); 
+  */
+
 }
 
 /**
