@@ -73,10 +73,10 @@ const uint8_t I2C_SCL = 3;  // GP3
 
 // Distance thresholds (millimeters)
 const uint16_t DETECT_MIN_MM = 50;    // Minimum detection distance
-const uint16_t DETECT_MAX_MM = 1000;   // Maximum detection distance
+const uint16_t DETECT_MAX_MM = 800;   // Maximum detection distance
 
 // Speed parameters (0-100 range)
-const float ROTATION_SPEED = 40.0f;   // Speed for rotating to face object
+const float ROTATION_SPEED = 70.0f;   // Speed for rotating to face object
 const float BIAS_DEADZONE = 0.25f;    // Deadzone for "centered" detection (0.0-1.0)
 
 // Timing (milliseconds)
@@ -84,7 +84,7 @@ const uint32_t READ_INTERVAL = 200;   // Sensor read interval (5 Hz) - Core0
 const uint32_t MOTOR_INTERVAL = 20;   // Motor update interval (50 Hz) - Core1
 const uint32_t LOST_TIMEOUT = 2000;   // Stop if no target for 2 seconds
 const uint32_t WATCHDOG_TIMEOUT = 500;  // Stop motors if Core0 unresponsive
-const uint8_t DIRECTION_CONFIRMATIONS = 2;   // Require N frames before committing a turn
+const uint8_t DIRECTION_CONFIRMATIONS = 1;   // Require N frames before committing a turn
 const uint16_t FRONT_ALIGNMENT_DELTA_MM = 40;  // Max distance delta between L23/R23 to treat as centered
 const uint32_t SEARCH_EXPANSION_DELAY = 8000;  // After 8s without detections, widen search envelope
 const uint16_t DETECT_MAX_SEARCH_MM = 1600;    // Absolute ceiling for search distance
@@ -270,7 +270,7 @@ float calculateDirectionBias(const ToFSample* samples) {
   const float weights[TOF_NUM] = {
     -1.0f,  // R45 (index 0) - far right
     -0.5f,  // R23 (index 1) - near right
-    0.0f,  // M0  (index 2) - center
+     0.0f,  // M0  (index 2) - center
     +0.5f,  // L23 (index 3) - near left
     +1.0f   // L45 (index 4) - far left
   };
@@ -588,8 +588,8 @@ void processTracking(const ToFSample* samples) {
 
     if (frontAligned || frontClose) {
       direction = frontAligned ? "◎ FRONT HOLD" : "◎ FRONT DETECT";
-      leftSpeed = 100.0f;
-      rightSpeed = -100.0f;
+      leftSpeed = 0.0f;
+      rightSpeed = 0.0f;
       resetDirectionFilter();
     } else if (filtered > 0) {
       leftSpeed = -ROTATION_SPEED;

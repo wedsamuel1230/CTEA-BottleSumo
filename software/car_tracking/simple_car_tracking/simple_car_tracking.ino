@@ -35,11 +35,11 @@ constexpr uint8_t I2C_SCL = 3;
 
 constexpr uint8_t ADS_I2C_ADDR = 0x48;
 constexpr adsGain_t ADS_GAIN = GAIN_ONE;      // ±4.096 V
-constexpr uint8_t ADS_RATE = RATE_ADS1115_250SPS;
+constexpr uint8_t ADS_RATE = RATE_ADS1115_860SPS;
 constexpr uint8_t IR_CHANNELS = 4;            // A0~A3
-constexpr float IR_THRESHOLD_VOLTS = 2.6f;    // >此電壓視為邊界
+constexpr float IR_THRESHOLD_VOLTS = 2.5f;    // >此電壓視為邊界
 
-constexpr uint8_t START_BUTTON_PIN = 18;      // 假設使用 GP16，接地觸發
+constexpr uint8_t START_BUTTON_PIN = 28;      // 假設使用 GP16，接地觸發
 constexpr bool BUTTON_ACTIVE_LEVEL = LOW;     // 內建上拉，按下=LOW
 
 // -----------------------------------------------------------------------------
@@ -334,7 +334,7 @@ void setup() {
   delay(1000);
   Serial.println();
   Serial.println("========================================");
-  Serial.println(" BottleSumo FSM / 瓶子相撲狀態機");
+  Serial.println(" BottleSumo FSM");
   Serial.println("========================================");
 
   pinMode(START_BUTTON_PIN, INPUT_PULLUP);
