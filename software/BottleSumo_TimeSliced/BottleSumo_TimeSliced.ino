@@ -866,13 +866,13 @@ MotorCommand executeAction(SumoAction action, const SensorData &sensors) {
     case SEARCH_OPPONENT:
       // Rotate in place to scan for opponent
       cmd.left_speed = 50;
-      cmd.right_speed = -50;
+      cmd.right_speed = 50;
       break;
       
     case ATTACK_FORWARD:
       // Full speed forward attack
       cmd.left_speed = 100;
-      cmd.right_speed = 100;
+      cmd.right_speed = -100;
       break;
     
     // ===== Edge Detection Retreat Actions =====
@@ -880,49 +880,49 @@ MotorCommand executeAction(SumoAction action, const SensorData &sensors) {
     case RETREAT_FORWARD:
       // Both bottom sensors detected - move forward away from rear edge
       cmd.left_speed = 80;
-      cmd.right_speed = 80;
+      cmd.right_speed = -80;
       break;
       
     case RETREAT_BACKWARD:
       // Both top sensors detected - move backward away from front edge
       cmd.left_speed = -80;
-      cmd.right_speed = -80;
+      cmd.right_speed = 80;
       break;
       
     case RETREAT_FORWARD_LEFT:
       // Bottom-right sensor (A3) or diagonal - retreat forward and turn left
       cmd.left_speed = 40;   // Slower left for turning
-      cmd.right_speed = 80;  // Faster right
+      cmd.right_speed = -80;  // Faster right
       break;
       
     case RETREAT_FORWARD_RIGHT:
       // Bottom-left sensor (A2) or diagonal - retreat forward and turn right
       cmd.left_speed = 80;   // Faster left
-      cmd.right_speed = 40;  // Slower right for turning
+      cmd.right_speed = -40;  // Slower right for turning
       break;
       
     case RETREAT_BACKWARD_LEFT:
       // Top-right sensor (A1) - retreat backward and turn left
       cmd.left_speed = -40;  // Slower reverse left for turning
-      cmd.right_speed = -80; // Faster reverse right
+      cmd.right_speed = 80; // Faster reverse right
       break;
       
     case RETREAT_BACKWARD_RIGHT:
       // Top-left sensor (A0) - retreat backward and turn right
       cmd.left_speed = -80;  // Faster reverse left
-      cmd.right_speed = -40; // Slower reverse right for turning
+      cmd.right_speed = 40; // Slower reverse right for turning
       break;
       
     case RETREAT_LEFT:
       // Right side sensors (A1+A3) - strafe/turn left aggressively
       cmd.left_speed = -60;  // Reverse left
-      cmd.right_speed = 60;  // Forward right (spin left)
+      cmd.right_speed = -60;  // Forward right (spin left)
       break;
       
     case RETREAT_RIGHT:
       // Left side sensors (A0+A2) - strafe/turn right aggressively
       cmd.left_speed = 60;   // Forward left (spin right)
-      cmd.right_speed = -60; // Reverse right
+      cmd.right_speed = 60; // Reverse right
       break;
       
     default:

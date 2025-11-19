@@ -60,7 +60,8 @@ void Motor::setDuty(float speed) {
   digitalWrite(_dir_pin, forward ? HIGH : LOW);
   
   // Calculate and set PWM level
-  const uint16_t level = static_cast<uint16_t>(duty_fraction * _top);
+  const float inverted = 1.0f - duty_fraction;
+  const uint16_t level = static_cast<uint16_t>(inverted * _top);
   pwm_set_chan_level(_slice, _channel, level);
 }
 

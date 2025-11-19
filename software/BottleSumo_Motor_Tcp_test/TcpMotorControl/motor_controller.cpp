@@ -41,7 +41,7 @@ void MotorController::setLeft(int16_t value) {
 void MotorController::setRight(int16_t value) {
   _rightValue = constrain(value, -255, 255);
   _rightDuty = mapValueToDuty(_rightValue);
-  _motorRight.setDuty(_rightDuty);
+  _motorRight.setDuty(-_rightDuty); // Inverted because right motor is mirrored
 }
 
 void MotorController::setBoth(int16_t left, int16_t right) {
