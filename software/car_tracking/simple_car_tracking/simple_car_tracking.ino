@@ -33,7 +33,7 @@ constexpr uint32_t MOTOR_PWM_FREQ = 20000;  // 20 kHz 靜音 PWM
 constexpr uint8_t TOF_NUM = 5;
 constexpr uint8_t TOF_XSHUT_PINS[TOF_NUM] = {8, 7, 6, 5, 4};
 constexpr uint8_t TOF_I2C_ADDR[TOF_NUM] = {0x30, 0x31, 0x32, 0x33, 0x34};
-constexpr const char* TOF_NAMES[TOF_NUM] = {"R45", "R23", "M0", "L23", "L45"};
+constexpr const char* TOF_NAMES[TOF_N] = {"R45", "R23", "M0", "L23", "L45"};
 constexpr uint8_t I2C_SDA = 2;
 constexpr uint8_t I2C_SCL = 3;
 
