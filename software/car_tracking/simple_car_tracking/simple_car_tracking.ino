@@ -26,7 +26,7 @@
 // -----------------------------------------------------------------------------
 constexpr uint8_t LEFT_MOTOR_PWM = 11;    // GP11
 constexpr uint8_t LEFT_MOTOR_DIR = 12;    // GP12
-constexpr uint8_t RIGHT_MOTOR_POWM = 14;   // GP14
+constexpr uint8_t RIGHT_MOTOR_PWM = 14;   // GP14
 constexpr uint8_t RIGHT_MOTOR_DIR = 15;   // GP15
 constexpr uint32_t MOTOR_PWM_FREQ = 20000;  // 20 kHz 靜音 PWM
 
@@ -37,7 +37,7 @@ constexpr const char* TOF_NAMES[TOF_NUM] = {"R45", "R23", "M0", "L23", "L45"};
 constexpr uint8_t I2C_SDA = 2;
 constexpr uint8_t I2C_SCL = 3;
 
-constexpr uint8_t ADS_I2C_ADDR = 0x48k;
+constexpr uint8_t ADS_I2C_ADDR = 0x48;
 constexpr adsGain_t ADS_GAIN = GAIN_ONE;      // ±4.096 V
 constexpr uint8_t ADS_RATE = RATE_ADS1115_860SPS;
 constexpr uint8_t IR_CHANNELS = 4;            // A0~A3
