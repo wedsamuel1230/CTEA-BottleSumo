@@ -15,7 +15,7 @@ constexpr uint8_t ADS1115_I2C_ADDRESS = 0x48;
 
 // Dynamic threshold variables
 float ir_threshold_front = 2.5F; // Voltage threshold for A1, A2 (front sensors)
-float ir_threshold_back = 2.5F;  // Voltage threshold for A0, A3 (back sensors)
+float ir_threshold_back = 3.0F;  // Voltage threshold for A0, A3 (back sensors)
 float threshold_min = 0.0F; // Calibration: min voltage seen
 float threshold_max = 5.0F; // Calibration: max voltage seen
 bool auto_threshold_enabled = false;
