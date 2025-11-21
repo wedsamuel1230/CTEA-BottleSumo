@@ -34,13 +34,12 @@ constexpr uint8_t RIGHT_MOTOR_PWM = 14;
 constexpr uint8_t RIGHT_MOTOR_DIR = 15;
 constexpr uint32_t MOTOR_PWM_FREQ = 20000;  // 20 kHz silent PWM
 
-constexpr uint8_t TOF_NUM = 5;
-// 把 XSHUT 腳位改成交錯順序（最重要！減少相鄰感測器間的串擾）
-// 特別將 R45 和 L45 分開，避免兩側 45 度感測器互相干擾
-constexpr uint8_t TOF_XSHUT_PINS[TOF_NUM] = {8, 6, 5, 7, 4};  // R45, L23, R23, L45, MID
-constexpr uint8_t TOF_I2C_ADDR[TOF_NUM] = {0x30, 0x31, 0x32, 0x33, 0x34};
+constexpr uint8_t TOF_NUM = 3;
+// Only 3 sensors now: L23, MID, R23 (removed R45 and L45 for speed)
+constexpr uint8_t TOF_XSHUT_PINS[TOF_NUM] = {5, 7, 6};  // L23, R23, MID
+constexpr uint8_t TOF_I2C_ADDR[TOF_NUM] = {0x30, 0x31, 0x32};
 // 對應名稱也要改（方便除錯）
-constexpr const char* TOF_NAMES[TOF_NUM] = {"R45", "L23", "R23", "L45", "MID"};
+constexpr const char* TOF_NAMES[TOF_NUM] = {"L23", "R23", "MID"};
 constexpr uint8_t I2C_SDA = 2;
 constexpr uint8_t I2C_SCL = 3;
 
@@ -59,19 +58,18 @@ constexpr uint8_t ADS1115_I2C_ADDRESS = 0x48;
 // Tracking parameters
 // 中文：調整感測區間、偏差死區、轉向增益、搜尋速度等行為參數
 // -----------------------------------------------------------------------------
-constexpr uint16_t DETECT_MIN_MM = 70;
+constexpr uint16_t DETECT_MIN_MM = 85;
 constexpr uint16_t DETECT_MAX_MM = 1000;
 constexpr float BIAS_DEADZONE = 0.1f;
-constexpr float TURN_GAIN = 30.0f;
-constexpr float TURN_CLAMP = 25.0f;
-constexpr float SEARCH_SPIN_SPEED = 40.0f;  // Lower = faster spin when searching
+constexpr float TURN_GAIN = 70.0f;
+constexpr float TURN_CLAMP = 75.0f;
+constexpr float SEARCH_SPIN_SPEED = 65.0f;  // Higher = slower (search rotation)
 constexpr float LOST_HOLD_MS = 2000.0f;
-constexpr uint32_t SENSOR_INTERVAL_MS = 35;  // Faster sensor reading (was 60ms)
+constexpr uint32_t SENSOR_INTERVAL_MS = 25;  // Faster with only 3 sensors
 constexpr uint32_t WATCHDOG_TIMEOUT_MS = 500;
-constexpr float ALIGN_SPIN_SPEED = 50.0f;  // Lower = faster alignment
-constexpr float ALIGN_FINE_SPIN_SPEED = 50.0f;  // Lower = faster fine alignment
-constexpr float CENTER_PUSH_SPEED = 5.0f;  // Very low = very fast push!
-constexpr float LEFT_MOTOR_COMPENSATION = 1.5f;  // Left motor is faster, reduce by 15%
+constexpr float ALIGN_SPIN_SPEED = 68.0f;  // Higher = slower (coarse alignment)
+constexpr float ALIGN_FINE_SPIN_SPEED = 82.0f;  // Higher = slower (fine alignment)
+constexpr float CENTER_PUSH_SPEED = 5.0f;  // Higher = slower (full attack speed)
 
 // -----------------------------------------------------------------------------
 // Edge detection parameters (from car_ir)
@@ -79,7 +77,7 @@ constexpr float LEFT_MOTOR_COMPENSATION = 1.5f;  // Left motor is faster, reduce
 // -----------------------------------------------------------------------------
 // Dynamic threshold variables
 float ir_threshold_front = 1.5F; // Voltage threshold for A1, A2 (front sensors)
-float ir_threshold_back = 3.0F;  // Voltage threshold for A0, A3 (back sensors)
+float ir_threshold_back = 4.0F;  // Voltage threshold for A0, A3 (back sensors)
 float threshold_min = 0.0F; // Calibration: min voltage seen
 float threshold_max = 5.0F; // Calibration: max voltage seen
 bool auto_threshold_enabled = false;
@@ -111,7 +109,7 @@ bool gButtonUsed = false; // Track if button has been pressed (one-time use)
 unsigned long gLastButtonPress = 0;
 unsigned long gStartDelayEndTime = 0; // Time when 2s forward delay ends
 bool gInStartDelay = false; // Flag for 2s forward movement after button press
-constexpr unsigned long START_FORWARD_DELAY_MS = 3000UL; // 3 seconds forward after start
+constexpr unsigned long START_FORWARD_DELAY_MS = 2000UL; // 2 seconds forward after start
 
 // -----------------------------------------------------------------------------
 // Shared motor command (Core 0 -> Core 1)
@@ -140,9 +138,12 @@ unsigned long gLastSensorRead = 0;
 unsigned long gLastTargetSeen = 0;
 unsigned long gLastIrRead = 0;
 
-enum class TrackerMode { Searching, Holding, Aligning, Centered };
+enum class TrackerMode { Searching, Holding, Aligning, Centered, Pushing };
 TrackerMode gMode = TrackerMode::Searching;
 uint8_t gLastSensorHit = 0xFF;
+bool gPushMode = false;  // When true, ignore all ToF sensors and just push
+uint8_t gCenteredCount = 0;  // Count consecutive centered detections
+constexpr uint8_t CENTERED_THRESHOLD = 3;  // Need 3 consecutive centered before push mode
 
 struct TargetInfo {
 	bool seen = false;
@@ -208,19 +209,16 @@ const char* directionLabel(float leftCmd, float rightCmd) {
 // 中文：傳遞馬達指令到共享結構，並在序列埠上標記原因 + 移動方向
 void sendMotorCommand(float left, float right, bool emergencyStop = false,
 					 const char* reason = nullptr) {
-	// Apply left motor compensation (left motor is faster, so increase value to slow it down)
-	float compensatedLeft = left * LEFT_MOTOR_COMPENSATION;
-	
 	mutex_enter_blocking(&gMotorMutex);
-	gSharedCommand.leftSpeed = compensatedLeft;
+	gSharedCommand.leftSpeed = left;
 	gSharedCommand.rightSpeed = right;
 	gSharedCommand.emergencyStop = emergencyStop;
 	gSharedCommand.timestamp = millis();
 	gSharedCommand.valid = true;
 	mutex_exit(&gMotorMutex);
 
-	Serial.printf("[CMD] t=%lu L=%.1f(%.1f) R=%.1f dir=%s stop=%s",
-			 millis(), compensatedLeft, left, right, directionLabel(compensatedLeft, right),
+	Serial.printf("[CMD] t=%lu L=%.1f R=%.1f dir=%s stop=%s",
+			 millis(), left, right, directionLabel(left, right),
 			 emergencyStop ? "yes" : "no");
 	if (reason && reason[0]) {
 		Serial.printf(" reason=%s", reason);
@@ -245,7 +243,7 @@ bool readMotorCommand(MotorCommand& out) {
 
 // 中文：掃描五顆 ToF，挑選落在距離範圍內且最近的目標，並以權重換算左右偏差
 TargetInfo findClosestTarget(const ToFSample* samples) {
-	static constexpr float kWeights[TOF_NUM] = {-1.0f, -0.5f, 0.0f, +0.5f, +1.0f};
+	static constexpr float kWeights[TOF_NUM] = {+0.5f, -0.5f, 0.0f};  // L23(+0.5), R23(-0.5), MID(0)
 	TargetInfo info;
 	uint16_t closest = 0xFFFF;
 	for (uint8_t i = 0; i < TOF_NUM; ++i) {
@@ -275,6 +273,7 @@ const char* modeToString(TrackerMode mode) {
 		case TrackerMode::Holding: return "Hold";
 		case TrackerMode::Aligning: return "Align";
 		case TrackerMode::Centered: return "Center";
+		case TrackerMode::Pushing: return "PUSH";
 		default: return "Search";
 	}
 }
@@ -585,7 +584,11 @@ bool checkEdge() {
         return true;
     } else if (back_escape_mode) {
         back_escape_mode = false;
-        Serial.println("[EDGE] Back sensors safe again — car back in safe zone");
+        gPushMode = false;  // Exit push mode after back edge escape
+        gCenteredCount = 0;  // Reset centered counter
+        gMode = TrackerMode::Searching;  // Force back to search mode
+        gLastTargetSeen = 0;  // Reset target timer to trigger immediate search
+        Serial.println("[EDGE] Back sensors safe again — returning to SEARCH mode");
     }
     
     // Check if in emergency escape mode
@@ -594,7 +597,11 @@ bool checkEdge() {
             return true; // Still escaping
         } else {
             emergency_mode = false;
-            Serial.println("[EDGE] Emergency escape complete!");
+            gPushMode = false;  // Exit push mode after edge escape
+            gCenteredCount = 0;  // Reset centered counter
+            gMode = TrackerMode::Searching;  // Force back to search mode
+            gLastTargetSeen = 0;  // Reset target timer to trigger immediate search
+            Serial.println("[EDGE] Emergency escape complete! Returning to SEARCH mode");
             return false;
         }
     }
@@ -661,7 +668,7 @@ void updateStartButton() {
         
         Serial.println("\n[BUTTON] === ROBOT ACTIVATED (ONE-TIME USE) ===");
         Serial.println("[BUTTON] Button disabled - reset Pico to reuse");
-        Serial.println("[BUTTON] Moving forward for 3 seconds...");
+        Serial.println("[BUTTON] Moving forward for 2 seconds...");
         digitalWrite(PICO_LED_PIN, LOW);  // LED OFF when active
         gLastTargetSeen = millis(); // Reset target timer
         gInStartDelay = true; // Start the 2-second forward movement
@@ -675,6 +682,15 @@ void updateStartButton() {
 // -----------------------------------------------------------------------------
 void processTracking() {
 	unsigned long now = millis();
+	
+	// PUSH MODE: Ignore all ToF sensors, just push until edge stops us!
+	if (gPushMode) {
+		gMode = TrackerMode::Pushing;
+		sendMotorCommand(CENTER_PUSH_SPEED, -CENTER_PUSH_SPEED, false, "pushing-to-edge");
+		Serial.println("[PUSH] Ignoring ToF - pushing until edge!");
+		return;
+	}
+	
 	TargetInfo target = findClosestTarget(gSamples);
 
 	if (target.seen) {
@@ -682,15 +698,40 @@ void processTracking() {
 		gLastSensorHit = target.sensorIndex;
 	}
 
+	// EASY MODE: If MID sensor detects object < 100mm, enter PUSH MODE!
+	if (gSamples[2].valid && gSamples[2].distanceMm < 100) {
+		gMode = TrackerMode::Pushing;
+		gPushMode = true;  // Activate push mode - ignore ToF from now on
+		Serial.println("[PUSH] MID < 100mm! Entering PUSH MODE - ignoring all ToF!");
+		sendMotorCommand(CENTER_PUSH_SPEED, -CENTER_PUSH_SPEED, false, "push-mode-start");
+		printSamples(target);
+		return;
+	}
+
 	if (target.seen) {
 		float bias = target.bias;
 		float absBias = fabsf(bias);
 		if (absBias <= BIAS_DEADZONE) {
+			// Object is centered!
+			gCenteredCount++;
+			Serial.printf("[CENTERED] Count: %u/%u\n", gCenteredCount, CENTERED_THRESHOLD);
+			
+			// Check if we've been centered for 3 consecutive readings
+			if (gCenteredCount >= CENTERED_THRESHOLD) {
+				gMode = TrackerMode::Pushing;
+				gPushMode = true;  // Activate push mode - ignore ToF from now on
+				Serial.println("[PUSH] 3x CENTERED! Entering PUSH MODE - ignoring all ToF!");
+				sendMotorCommand(CENTER_PUSH_SPEED, -CENTER_PUSH_SPEED, false, "push-mode-3x-center");
+				printSamples(target);
+				return;
+			}
+			
+			// Not yet 3 times, just keep centered
 			gMode = TrackerMode::Centered;
-			// FAST push when centered - edge detection will stop us
-			// Lower value = faster speed
 			sendMotorCommand(CENTER_PUSH_SPEED, -CENTER_PUSH_SPEED, false, "center-push");
 		} else {
+			// Not centered anymore - reset counter
+			gCenteredCount = 0;
 			float spin = (absBias > 0.5f) ? ALIGN_SPIN_SPEED : ALIGN_FINE_SPIN_SPEED;
 			if (bias > 0) {
 				gMode = TrackerMode::Aligning;
@@ -701,9 +742,13 @@ void processTracking() {
 			}
 		}
 	} else if (now - gLastTargetSeen < LOST_HOLD_MS) {
+		// Lost target - reset counter
+		gCenteredCount = 0;
 		gMode = TrackerMode::Holding;
 		sendMotorCommand(0.0f, 0.0f, false, "hold-wait");
 	} else {
+		// Searching - reset counter
+		gCenteredCount = 0;
 		gMode = TrackerMode::Searching;
 		sendMotorCommand(SEARCH_SPIN_SPEED, SEARCH_SPIN_SPEED, false, "search-spin");
 	}
@@ -745,7 +790,7 @@ void setup() {
                 }
         }
         // 延長 timing budget（讓每顆感測器發射完到下一顆有足夠間隔）
-        gTof.setTiming(33000, 15, 8);    // 33ms budget for faster response (was 50ms)
+        gTof.setTiming(66000, 20, 14);    // 66ms budget，穩定性 > 速度
         uint8_t online = gTof.beginAll();
         Serial.printf("[CORE0] Sensors online: %u/%u\n", online, TOF_NUM);
 
