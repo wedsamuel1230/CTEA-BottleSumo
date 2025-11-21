@@ -1,0 +1,659 @@
+/**
+ * Dual-Core BottleSumo Yoshi (Fast IR + Edge Escape)
+ * --------------------------------------------------
+ * Core 0:  + decision logic motor response
+ * Core 1: Fast IR reading + edge escape + ToF reading 
+ * 
+ * ToF Reading Order (interleaved to prevent sensor collision):
+ *   R45 → L23 → R23 → L45 → MID
+ *   Index mapping: [0]=R45, [1]=L23, [2]=R23, [3]=L45, [4]=MID
+ * 
+ * Hardware:
+ *   - 5× VL53L0X ToF sensors (interleaved reading)
+ *   - 4× IR sensors via ADS1115 (fast 20Hz sampling)
+ *   - 2× DC motors (fast 50Hz update)
+ *   - 2× Buttons (GP18 test, GP28 start)
+ */
+
+#include <Wire.h>
+#include <math.h>
+#include <pico/mutex.h>
+
+#include "Motor.h"
+#include "ToFArray.h"
+#include "Ads1115Sampler.h"
+
+// =============================================================================
+// HARDWARE CONFIGURATION
+// =============================================================================
+
+// Motors (using Motor.h directly for fast response)
+constexpr uint8_t LEFT_MOTOR_PWM = 11;
+constexpr uint8_t LEFT_MOTOR_DIR = 12;
+constexpr uint8_t RIGHT_MOTOR_PWM = 14;
+constexpr uint8_t RIGHT_MOTOR_DIR = 15;
+constexpr uint32_t MOTOR_PWM_FREQ = 20000;
+
+// ToF sensors - INTERLEAVED ORDER to prevent collision
+constexpr uint8_t TOF_NUM = 5;
+constexpr uint8_t TOF_XSHUT_PINS[TOF_NUM] = {8, 5, 7, 4, 6};  // R45, L23, R23, L45, MID
+constexpr uint8_t TOF_I2C_ADDR[TOF_NUM] = {0x30, 0x31, 0x32, 0x33, 0x34};
+constexpr const char* TOF_NAMES[TOF_NUM] = {"R45", "L23", "R23", "L45", "MID"};
+constexpr uint8_t I2C_SDA = 2;
+constexpr uint8_t I2C_SCL = 3;
+
+// IR sensors
+constexpr uint8_t ADS_I2C_ADDR = 0x48;
+constexpr uint8_t IR_SENSOR_CHANNELS = 4;
+constexpr const char* IR_NAMES[IR_SENSOR_CHANNELS] = {"BL", "FL", "FR", "BR"};
+
+// Buttons
+constexpr uint8_t BUTTON_TEST_PIN = 18;
+constexpr uint8_t BUTTON_START_PIN = 28;
+
+// =============================================================================
+// TIMING & BEHAVIOR PARAMETERS
+// =============================================================================
+
+// Core 0 (ToF + Decision) - SLOWER
+constexpr uint32_t TOF_READ_INTERVAL_MS = 100;    // 10Hz ToF (slower for stability)
+constexpr float SEARCH_SPIN_SPEED = 35.0f;        // Fast search (matches car_tracking)
+constexpr float ALIGN_SPIN_SPEED = 32.0f;         // Responsive coarse align
+constexpr float ALIGN_FINE_SPIN_SPEED = 18.0f;    // Balanced fine align
+constexpr uint32_t LOST_HOLD_MS = 2000;
+
+// Core 1 (IR + Motors) - FASTER
+constexpr uint32_t IR_READ_INTERVAL_MS = 50;      // 20Hz IR sampling (fast edge detection)
+constexpr uint32_t MOTOR_UPDATE_INTERVAL_MS = 20; // 50Hz motor update (fast response)
+
+// Detection
+constexpr uint16_t DETECT_MIN_MM = 40;
+constexpr uint16_t DETECT_MAX_MM = 1000;
+constexpr float BIAS_DEADZONE = 0.1f;
+
+// Edge escape (from car_ir)
+constexpr float IR_THRESHOLD_FRONT = 1.5f;
+constexpr float IR_THRESHOLD_BACK = 2.5f;
+constexpr float ESCAPE_SPEED = 70.0f;
+constexpr float BACK_ESCAPE_SPEED = 100.0f;
+
+// Debounce
+constexpr uint32_t DEBOUNCE_DELAY_MS = 50;
+
+// =============================================================================
+// SHARED DATA STRUCTURES (Protected by Mutex)
+// =============================================================================
+
+struct MotorCommand {
+    float leftSpeed = 0.0f;
+    float rightSpeed = 0.0f;
+    uint32_t timestamp = 0;
+    bool valid = false;
+    bool emergencyStop = false;
+};
+
+struct SensorData {
+    ToFSample tofSamples[TOF_NUM];
+    float irVolts[IR_SENSOR_CHANNELS];
+    uint32_t timestamp = 0;
+    bool valid = false;
+};
+
+struct TargetInfo {
+    bool seen = false;
+    uint8_t sensorIndex = 0xFF;
+    uint16_t distanceMm = 0;
+    float bias = 0.0f;
+};
+
+// Shared globals (protected by mutex)
+static MotorCommand gSharedMotorCmd;
+static SensorData gSharedSensorData;
+static mutex_t gMotorMutex;
+static mutex_t gSensorMutex;
+
+// =============================================================================
+// CORE 1 GLOBALS (IR + Motors + Edge Escape)
+// =============================================================================
+
+Motor gLeftMotor(LEFT_MOTOR_PWM, LEFT_MOTOR_DIR);
+Motor gRightMotor(RIGHT_MOTOR_PWM, RIGHT_MOTOR_DIR);
+Ads1115Sampler gAdc;
+
+float gIrVolts[IR_SENSOR_CHANNELS] = {0};
+bool gInEscapeMode = false;
+uint8_t gEscapePattern = 0;
+unsigned long gEscapeStartTime = 0;
+
+bool gStarted = false;
+int gLastButtonState = HIGH;
+unsigned long gLastDebounceTime = 0;
+
+unsigned long gLastIrRead = 0;
+unsigned long gLastMotorUpdate = 0;
+
+// =============================================================================
+// CORE 0 GLOBALS (ToF + Decision)
+// =============================================================================
+
+ToFArray gTof(&Wire1, nullptr);
+ToFSample gLocalTofSamples[TOF_NUM];
+unsigned long gLastTofRead = 0;
+unsigned long gLastTargetSeen = 0;
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+// Send motor command from Core 0 to Core 1
+void sendMotorCommand(float left, float right, bool estop = false) {
+    mutex_enter_blocking(&gMotorMutex);
+    gSharedMotorCmd.leftSpeed = left;
+    gSharedMotorCmd.rightSpeed = right;
+    gSharedMotorCmd.emergencyStop = estop;
+    gSharedMotorCmd.timestamp = millis();
+    gSharedMotorCmd.valid = true;
+    mutex_exit(&gMotorMutex);
+}
+
+// Read motor command in Core 1
+bool readMotorCommand(MotorCommand& out) {
+    mutex_enter_blocking(&gMotorMutex);
+    out = gSharedMotorCmd;
+    mutex_exit(&gMotorMutex);
+    
+    if (!out.valid) return false;
+    if (millis() - out.timestamp > 500) return false; // Watchdog
+    return true;
+}
+
+// Update sensor data from Core 1 to Core 0
+void updateSensorData(const float* irVolts) {
+    mutex_enter_blocking(&gSensorMutex);
+    memcpy(gSharedSensorData.irVolts, irVolts, sizeof(float) * IR_SENSOR_CHANNELS);
+    gSharedSensorData.timestamp = millis();
+    gSharedSensorData.valid = true;
+    mutex_exit(&gSensorMutex);
+}
+
+// Read sensor data in Core 0
+bool readSensorData(float* irVolts) {
+    mutex_enter_blocking(&gSensorMutex);
+    if (gSharedSensorData.valid) {
+        memcpy(irVolts, gSharedSensorData.irVolts, sizeof(float) * IR_SENSOR_CHANNELS);
+        mutex_exit(&gSensorMutex);
+        return true;
+    }
+    mutex_exit(&gSensorMutex);
+    return false;
+}
+
+// Check for edge detection
+bool checkEdge(const float* irVolts, uint8_t& pattern) {
+    bool edge[4];
+    edge[0] = irVolts[0] > IR_THRESHOLD_BACK;  // Back-L (A0)
+    edge[1] = irVolts[1] > IR_THRESHOLD_FRONT; // Front-L (A1)
+    edge[2] = irVolts[2] > IR_THRESHOLD_FRONT; // Front-R (A2)
+    edge[3] = irVolts[3] > IR_THRESHOLD_BACK;  // Back-R (A3)
+    
+    pattern = (edge[3] << 3) | (edge[2] << 2) | (edge[1] << 1) | edge[0];
+    return (pattern != 0);
+}
+
+// Find closest target from ToF sensors (exact copy from car_tracking)
+TargetInfo findClosestTarget(const ToFSample* samples) {
+    static constexpr float kWeights[TOF_NUM] = {-1.0f, -0.5f, 0.0f, +0.5f, +1.0f};
+    
+    TargetInfo info;
+    uint16_t closest = 0xFFFF;
+    
+    for (uint8_t i = 0; i < TOF_NUM; ++i) {
+        const ToFSample& sample = samples[i];
+        if (!sample.valid) continue;
+        if (sample.distanceMm < DETECT_MIN_MM || sample.distanceMm > DETECT_MAX_MM) continue;
+        
+        if (sample.distanceMm < closest) {
+            closest = sample.distanceMm;
+            info.seen = true;
+            info.distanceMm = sample.distanceMm;
+            info.bias = kWeights[i];
+            info.sensorIndex = i;
+        }
+    }
+    
+    if (info.seen && fabsf(info.bias) < BIAS_DEADZONE) {
+        info.bias = 0.0f;
+    }
+    
+    return info;
+}
+
+// =============================================================================
+// CORE 1: FAST IR READING + MOTOR CONTROL + EDGE ESCAPE
+// =============================================================================
+
+// Execute edge escape maneuver (priority override)
+void executeEscape(uint8_t pattern) {
+    unsigned long elapsed = millis() - gEscapeStartTime;
+    float leftSpeed = 0.0f, rightSpeed = 0.0f;
+    const char* direction = "";
+    
+    switch (pattern) {
+        case 0b0001: // Back-L (A0)
+            if (elapsed < 500) {
+                leftSpeed = -ESCAPE_SPEED;
+                rightSpeed = ESCAPE_SPEED;
+                direction = "Back+Right";
+            } else if (elapsed < 1000) {
+                leftSpeed = ESCAPE_SPEED;
+                rightSpeed = -ESCAPE_SPEED;
+                direction = "Forward+Right";
+            } else {
+                gInEscapeMode = false;
+            }
+            break;
+            
+        case 0b0010: // Front-L (A1)
+            if (elapsed < 500) {
+                leftSpeed = -ESCAPE_SPEED;
+                rightSpeed = -ESCAPE_SPEED;
+                direction = "Back";
+            } else if (elapsed < 1000) {
+                leftSpeed = ESCAPE_SPEED;
+                rightSpeed = -ESCAPE_SPEED;
+                direction = "Turn Right";
+            } else {
+                gInEscapeMode = false;
+            }
+            break;
+            
+        case 0b0100: // Front-R (A2)
+            if (elapsed < 500) {
+                leftSpeed = -ESCAPE_SPEED;
+                rightSpeed = -ESCAPE_SPEED;
+                direction = "Back";
+            } else if (elapsed < 1000) {
+                leftSpeed = -ESCAPE_SPEED;
+                rightSpeed = ESCAPE_SPEED;
+                direction = "Turn Left";
+            } else {
+                gInEscapeMode = false;
+            }
+            break;
+            
+        case 0b1000: // Back-R (A3)
+            if (elapsed < 500) {
+                leftSpeed = ESCAPE_SPEED;
+                rightSpeed = -ESCAPE_SPEED;
+                direction = "Back+Left";
+            } else if (elapsed < 1000) {
+                leftSpeed = -ESCAPE_SPEED;
+                rightSpeed = ESCAPE_SPEED;
+                direction = "Forward+Left";
+            } else {
+                gInEscapeMode = false;
+            }
+            break;
+            
+        case 0b0011: // Front-L + Back-L (left side)
+            if (elapsed < 700) {
+                leftSpeed = -ESCAPE_SPEED;
+                rightSpeed = -ESCAPE_SPEED;
+                direction = "Back";
+            } else if (elapsed < 1500) {
+                leftSpeed = ESCAPE_SPEED;
+                rightSpeed = -ESCAPE_SPEED;
+                direction = "Turn Right Hard";
+            } else {
+                gInEscapeMode = false;
+            }
+            break;
+            
+        case 0b1100: // Front-R + Back-R (right side)
+            if (elapsed < 700) {
+                leftSpeed = -ESCAPE_SPEED;
+                rightSpeed = -ESCAPE_SPEED;
+                direction = "Back";
+            } else if (elapsed < 1500) {
+                leftSpeed = -ESCAPE_SPEED;
+                rightSpeed = ESCAPE_SPEED;
+                direction = "Turn Left Hard";
+            } else {
+                gInEscapeMode = false;
+            }
+            break;
+            
+        case 0b0110: // Front-L + Front-R (front)
+            if (elapsed < 800) {
+                leftSpeed = -ESCAPE_SPEED;
+                rightSpeed = -ESCAPE_SPEED;
+                direction = "Back";
+            } else if (elapsed < 1500) {
+                leftSpeed = ESCAPE_SPEED;
+                rightSpeed = -ESCAPE_SPEED;
+                direction = "Turn";
+            } else {
+                gInEscapeMode = false;
+            }
+            break;
+            
+        case 0b1001: // Back-L + Back-R (back)
+            if (elapsed < 800) {
+                leftSpeed = BACK_ESCAPE_SPEED;
+                rightSpeed = -BACK_ESCAPE_SPEED;
+                direction = "Forward Fast";
+            } else {
+                gInEscapeMode = false;
+            }
+            break;
+            
+        default: // Multiple edges - critical
+            direction = "STOP Critical";
+            leftSpeed = 0.0f;
+            rightSpeed = 0.0f;
+            if (elapsed > 500) {
+                gInEscapeMode = false;
+            }
+            break;
+    }
+    
+    // Apply motor speeds directly (fast response using Motor.h API)
+    gLeftMotor.setDuty(leftSpeed);
+    gRightMotor.setDuty(rightSpeed);
+    
+    // Print status every 100ms
+    static unsigned long lastEscapePrint = 0;
+    if (millis() - lastEscapePrint > 100 && gInEscapeMode) {
+        Serial.print("[CORE1-ESCAPE] ");
+        Serial.print(direction);
+        Serial.print(" | Motors: L=");
+        Serial.print(leftSpeed, 1);
+        Serial.print(" R=");
+        Serial.print(rightSpeed, 1);
+        Serial.print(" | Time: ");
+        Serial.print(elapsed);
+        Serial.println("ms");
+        lastEscapePrint = millis();
+    }
+}
+
+void setup1() {
+    // Wait for Core0 to initialize mutexes and I2C
+    delay(200);
+    
+    // Initialize motors (Motor.h for direct fast control)
+    if (!gLeftMotor.begin(MOTOR_PWM_FREQ)) {
+        Serial.println("[CORE1] ✗ Left motor init FAILED");
+    }
+    if (!gRightMotor.begin(MOTOR_PWM_FREQ)) {
+        Serial.println("[CORE1] ✗ Right motor init FAILED");
+    }
+    gLeftMotor.stop();
+    gRightMotor.stop();
+    Serial.println("[CORE1] ✓ Motors initialized (Motor.h)");
+    
+    // Wait before accessing shared I2C bus
+    delay(100);
+    
+    // Initialize ADS1115 for IR sensors (uses Wire1 shared with Core0)
+    if (!gAdc.begin(ADS_I2C_ADDR, &Wire1, GAIN_ONE, RATE_ADS1115_860SPS)) {
+        Serial.println("[CORE1] ✗ ADS1115 init FAILED - continuing anyway");
+    } else {
+        Serial.println("[CORE1] ✓ ADS1115 ready for IR sensors");
+    }
+    
+    // Initialize buttons
+    pinMode(BUTTON_TEST_PIN, INPUT_PULLUP);
+    pinMode(BUTTON_START_PIN, INPUT_PULLUP);
+    Serial.println("[CORE1] ✓ Buttons ready");
+    
+    Serial.println("[CORE1] Ready - Fast IR + Motor loop active");
+}
+
+void loop1() {
+    unsigned long now = millis();
+    
+    // 1. Read IR sensors at 20Hz
+    if (now - gLastIrRead >= IR_READ_INTERVAL_MS) {
+        gLastIrRead = now;
+        
+        int16_t raw[IR_SENSOR_CHANNELS];
+        gAdc.readAll(raw, gIrVolts, IR_SENSOR_CHANNELS);
+        updateSensorData(gIrVolts); // Share with Core 0
+    }
+    
+    // 2. Update start button
+    int reading = digitalRead(BUTTON_START_PIN);
+    if (reading != gLastButtonState) {
+        gLastDebounceTime = now;
+    }
+    if ((now - gLastDebounceTime) > DEBOUNCE_DELAY_MS) {
+        if (reading == LOW && !gStarted) {
+            gStarted = true;
+            Serial.println("[CORE1-BUTTON] START pressed - Robot activated!");
+        }
+    }
+    gLastButtonState = reading;
+    
+    // 3. Check for edge detection (highest priority)
+    if (gStarted) {
+        uint8_t edgePattern = 0;
+        if (checkEdge(gIrVolts, edgePattern)) {
+            if (!gInEscapeMode) {
+                gInEscapeMode = true;
+                gEscapeStartTime = now;
+                gEscapePattern = edgePattern;
+                Serial.print("[CORE1-EDGE] Detected 0b");
+                Serial.print(edgePattern, BIN);
+                Serial.print(" | IR: BL=");
+                Serial.print(gIrVolts[0], 2);
+                Serial.print(" FL=");
+                Serial.print(gIrVolts[1], 2);
+                Serial.print(" FR=");
+                Serial.print(gIrVolts[2], 2);
+                Serial.print(" BR=");
+                Serial.print(gIrVolts[3], 2);
+                Serial.println(" - starting escape");
+            }
+        }
+    }
+    
+    // 4. Motor update at 50Hz
+    if (now - gLastMotorUpdate >= MOTOR_UPDATE_INTERVAL_MS) {
+        gLastMotorUpdate = now;
+        
+        if (!gStarted) {
+            // Stop if not started
+            gLeftMotor.stop();
+            gRightMotor.stop();
+        } else if (gInEscapeMode) {
+            // Execute edge escape (priority override)
+            executeEscape(gEscapePattern);
+            
+            if (!gInEscapeMode) {
+                Serial.println("[CORE1-EDGE] Escape complete");
+            }
+        } else {
+            // Read motor command from Core 0
+            MotorCommand cmd;
+            if (readMotorCommand(cmd)) {
+                if (cmd.emergencyStop) {
+                    gLeftMotor.stop();
+                    gRightMotor.stop();
+                } else {
+                    gLeftMotor.setDuty(cmd.leftSpeed);
+                    gRightMotor.setDuty(cmd.rightSpeed);
+                }
+            } else {
+                // Watchdog timeout - stop
+                gLeftMotor.stop();
+                gRightMotor.stop();
+            }
+        }
+    }
+    
+    delay(5);
+}
+
+// =============================================================================
+// CORE 0: SLOW TOF READING + DECISION LOGIC
+// =============================================================================
+
+void setup() {
+    Serial.begin(115200);
+    delay(1000); // Longer delay for USB serial stability
+    
+    // Initialize mutexes FIRST (before core1 starts)
+    mutex_init(&gMotorMutex);
+    mutex_init(&gSensorMutex);
+    
+    // Small delay to ensure mutexes are ready
+    delay(100);
+    
+    Serial.println("\n=== Dual-Core BottleSumo Yoshi (Fast IR + Interleaved ToF) ===\n");
+    
+    // Initialize I2C for ToF sensors (Wire1 - shared with Core1)
+    Wire1.setSDA(I2C_SDA);
+    Wire1.setSCL(I2C_SCL);
+    Wire1.begin();
+    Wire1.setClock(100000); // Slower I2C clock for stability (100kHz)
+    
+    // Configure ToF array (interleaved order to prevent collision)
+    if (!gTof.configure(TOF_NUM, TOF_XSHUT_PINS, TOF_I2C_ADDR)) {
+        Serial.println("[CORE0] ✗ ToF configure FAILED");
+        while (true) delay(1000);
+    }
+    
+    // Use longer timing budget for more reliable readings
+    gTof.setTiming(50000, 20, 10);
+    
+    // Initialize ToF sensors one at a time with delays
+    uint8_t online = 0;
+    for (uint8_t i = 0; i < TOF_NUM; i++) {
+        delay(100); // Space out initialization to prevent I2C collisions
+    }
+    online = gTof.beginAll();
+    
+    Serial.print("[CORE0] ✓ ToF sensors online: ");
+    Serial.print(online);
+    Serial.print("/");
+    Serial.println(TOF_NUM);
+    
+    if (online < 3) {
+        Serial.println("[CORE0] ⚠ WARNING: Less than 3 ToF sensors online!");
+        Serial.println("[CORE0] Continuing anyway...");
+    }
+    
+    // Print sensor configuration (interleaved order)
+    Serial.println("[CORE0] ToF Reading Order (interleaved to prevent collision):");
+    for (uint8_t i = 0; i < TOF_NUM; i++) {
+        Serial.print("  [");
+        Serial.print(i);
+        Serial.print("] ");
+        Serial.print(TOF_NAMES[i]);
+        Serial.print(" @ 0x");
+        Serial.print(TOF_I2C_ADDR[i], HEX);
+        Serial.print(" (GP");
+        Serial.print(TOF_XSHUT_PINS[i]);
+        Serial.println(")");
+    }
+    
+    gLastTargetSeen = millis();
+    Serial.println("[CORE0] Ready - Slow ToF + Decision loop active\n");
+}
+
+void loop() {
+    unsigned long now = millis();
+    
+    // Read ToF sensors at slower rate (10Hz for stability)
+    if (now - gLastTofRead >= TOF_READ_INTERVAL_MS) {
+        gLastTofRead = now;
+        
+        // Read all ToF sensors (interleaved order: R45→L23→R23→L45→MID)
+        // Use lower retry count to prevent blocking
+        gTof.readAll(gLocalTofSamples, DETECT_MIN_MM, DETECT_MAX_MM, 2);
+        
+        // If not started, print sensor status
+        if (!gStarted) {
+            static unsigned long lastIdlePrint = 0;
+            if (now - lastIdlePrint >= 500) {
+                lastIdlePrint = now;
+                
+                float irVolts[IR_SENSOR_CHANNELS];
+                if (readSensorData(irVolts)) {
+                    Serial.print("[CORE0-IDLE] IR: BL=");
+                    Serial.print(irVolts[0], 2);
+                    Serial.print("V FL=");
+                    Serial.print(irVolts[1], 2);
+                    Serial.print("V FR=");
+                    Serial.print(irVolts[2], 2);
+                    Serial.print("V BR=");
+                    Serial.print(irVolts[3], 2);
+                    Serial.print("V | ToF: ");
+                }
+                
+                for (int i = 0; i < TOF_NUM; i++) {
+                    Serial.print(TOF_NAMES[i]);
+                    Serial.print("=");
+                    if (gLocalTofSamples[i].valid) {
+                        Serial.print(gLocalTofSamples[i].distanceMm);
+                    } else {
+                        Serial.print("----");
+                    }
+                    Serial.print("mm ");
+                }
+                Serial.println(" | Waiting for button...");
+            }
+            
+            sendMotorCommand(0, 0, true); // Emergency stop
+            delay(10);
+            return;
+        }
+        
+        // Find closest target
+        TargetInfo target = findClosestTarget(gLocalTofSamples);
+        
+        // Decision logic (exact copy from car_tracking but slower speeds)
+        if (target.seen) {
+            gLastTargetSeen = now;
+            
+            float bias = target.bias;
+            float absBias = fabsf(bias);
+            
+            if (absBias <= BIAS_DEADZONE) {
+                // Centered - attack
+                sendMotorCommand(100.0f, -100.0f);
+                Serial.print("[CORE0-TRACK] ATTACK ");
+                Serial.print(TOF_NAMES[target.sensorIndex]);
+                Serial.print(" @ ");
+                Serial.print(target.distanceMm);
+                Serial.println("mm");
+            } else {
+                // Align to target (slower speeds)
+                float spin = (absBias > 0.5f) ? ALIGN_SPIN_SPEED : ALIGN_FINE_SPIN_SPEED;
+                if (bias > 0) {
+                    sendMotorCommand(-spin, -spin);
+                    Serial.print("[CORE0-TRACK] Align LEFT (slow) - ");
+                } else {
+                    sendMotorCommand(spin, spin);
+                    Serial.print("[CORE0-TRACK] Align RIGHT (slow) - ");
+                }
+                Serial.print(TOF_NAMES[target.sensorIndex]);
+                Serial.print(" @ ");
+                Serial.print(target.distanceMm);
+                Serial.print("mm bias=");
+                Serial.println(bias, 2);
+            }
+        } else if (now - gLastTargetSeen < LOST_HOLD_MS) {
+            // Lost target recently - hold
+            sendMotorCommand(0, 0);
+            Serial.println("[CORE0-TRACK] HOLD - target lost");
+        } else {
+            // Search (slower spin)
+            sendMotorCommand(SEARCH_SPIN_SPEED, SEARCH_SPIN_SPEED);
+            Serial.println("[CORE0-SEARCH] Spinning (slow)");
+        }
+    }
+    
+    delay(10);
+}
