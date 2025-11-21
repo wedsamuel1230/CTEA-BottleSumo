@@ -1,14 +1,17 @@
-//this is a car ir sensor control project
+//this is a car ir sensor control with button pressed on-start and hard code forward project
 
 #include <Wire.h>
 #include "Car.h"
 #include "Ads1115Sampler.h"
 
+constexpr uint8_t StartButton = 28; 
+bool startButtonState = false;
+
 constexpr uint8_t LEFT_MOTOR_PWM_PIN = 11;
 constexpr uint8_t LEFT_MOTOR_DIR_PIN = 12;
 constexpr uint8_t RIGHT_MOTOR_PWM_PIN = 14;
 constexpr uint8_t RIGHT_MOTOR_DIR_PIN = 15;
-constexpr uint32_t MOTOR_FREQ = 20000; // 20 kHz (safe for motor drivers)
+constexpr uint32_t MOTOR_FREQ = 40000; // 40kHz (safe for motor drivers)
 constexpr uint8_t IR_SENSOR_CHANNELS = 4;
 constexpr uint8_t IR_SENSOR_PINS[IR_SENSOR_CHANNELS] = {0, 1, 2, 3}; // A0 to A3
 constexpr uint8_t ADS1115_I2C_ADDRESS = 0x48;
@@ -40,7 +43,7 @@ const float BACK_ESCAPE_SPEED = 1.0F; // Max forward speed when rear is off the 
 
 // Auto-start configuration
 const unsigned long AUTO_START_DELAY_MS = 3000UL; // 3 second delay before auto-start
-bool auto_start_enabled = true; // Set to true for standalone operation
+bool auto_start_enabled = false; // Set to true for standalone operation
 unsigned long startup_time = 0;
 
 /*
@@ -379,20 +382,15 @@ void updateSearchingMode() {
 void setup(){
   Serial.begin(115200);
   
-  // For auto-start mode, don't wait for Serial
-  if (!auto_start_enabled) {
-    while (!Serial) {
-      delay(1);
-    }
-  } else {
-    delay(100); // Brief delay for serial to initialize if connected
-  }
+  // Don't wait for Serial, just a brief delay
+  delay(100);
   
   Serial.println("Car IR Sensor Control Project");
   
   // Record startup time
   startup_time = millis();
   
+  pinMode(StartButton, INPUT_PULLUP);// Set start button pin with pull-up resistor
   Wire1.setSDA(2);
   Wire1.setSCL(3);
   Wire1.begin();
@@ -413,10 +411,7 @@ void setup(){
   
   // Print help on startup
   Serial.println("\n=== Dynamic Threshold Control ===");
-  if (auto_start_enabled) {
-    Serial.printf("AUTO-START MODE: Car will start in %d seconds\n", AUTO_START_DELAY_MS / 1000);
-    Serial.println("Disconnect USB cable after programming!");
-  }
+  Serial.println("Press Start Button to begin sequence.");
   Serial.println("Type 'help' or '?' for commands");
   Serial.printf("Front threshold (A1,A2): %.3fV\n", ir_threshold_front);
   Serial.printf("Back threshold (A0,A3): %.3fV\n", ir_threshold_back);
@@ -430,158 +425,167 @@ void searching_mode(){
 }
 
 void loop(){
-    
-
-
-    // Check if still in startup delay period (for auto-start mode)
-    if (auto_start_enabled && (millis() - startup_time < AUTO_START_DELAY_MS)) {
-        // Show countdown
-        static unsigned long last_countdown = 0;
-        if (millis() - last_countdown >= 1000) {
-            last_countdown = millis();
-            unsigned long remaining = (AUTO_START_DELAY_MS - (millis() - startup_time)) / 1000;
-            Serial.printf("Starting in %lu seconds...\n", remaining + 1);
-        }
-        car.stop();
-        return; // Wait for delay to complete
+  if (!startButtonState) {
+    if (digitalRead(StartButton) == LOW) {
+      // Button pressed - start sequence
+      startButtonState = true;
+      
+      // Hardcoded sequence
+      // Move forward for 2.3s
+      car.forward(50.0F); 
+      delay(2300);
+      
+      // Turn right 0.3s
+      car.turnRight(50.0F);
+      delay(300);
+      
+      // Move forward 1s
+      car.forward(50.0F);
+      delay(1000);
+      
+    } else {
+      // Button not pressed - wait
+      car.stop();
+      return;
     }
-    
-    // Process serial commands for dynamic threshold control
-    processSerialCommands();
-    
-    // Check if in emergency escape mode
-    if (emergency_mode) {
-        if (millis() - emergency_start < EMERGENCY_DURATION_MS) {
-            // Continue emergency action - no sensor processing
-            return;
-        } else {
-            // Emergency complete
-            emergency_mode = false;
-            Serial.println("Emergency escape complete!");
-        }
-    }
-    
-    // Read IR sensor values with non-blocking call (proper timing)
-    static unsigned long lastSensorRead = 0;
-    if (millis() - lastSensorRead >= 10) { // Read every 10ms for fast response
-        lastSensorRead = millis();
-        
-        int16_t rawValues[IR_SENSOR_CHANNELS];
-        float voltValues[IR_SENSOR_CHANNELS];
-        adcSampler.readAll(rawValues, voltValues, IR_SENSOR_CHANNELS);
-        
-        // Update calibration if active
-        updateCalibration(voltValues);
-        
-        // Don't process sensor logic during calibration
-        if (auto_threshold_enabled) {
-            car.stop();
-            return;
-        }
-        
-        // Determine which sensors detect EDGE (voltage > threshold = out of area)
-        bool edge_detected[IR_SENSOR_CHANNELS];
-        // A0, A3 use back threshold; A1, A2 use front threshold
-        edge_detected[0] = (voltValues[0] > ir_threshold_back);  // A0 - back-left
-        edge_detected[1] = (voltValues[1] > ir_threshold_front); // A1 - front-left
-        edge_detected[2] = (voltValues[2] > ir_threshold_front); // A2 - front-right
-        edge_detected[3] = (voltValues[3] > ir_threshold_back);  // A3 - back-right
-        
-        // Create bit pattern: [A3][A2][A1][A0] 
-        // 1 = edge detected (danger!), 0 = safe
-        uint8_t pattern = (edge_detected[3] << 3) | (edge_detected[2] << 2) | (edge_detected[1] << 1) | edge_detected[0];
-        
-        // Print sensor readings - simple format
-        Serial.print("Sensors: ");
-        for (int i = 0; i < IR_SENSOR_CHANNELS; i++) {
-            Serial.printf("A%d:%.2fV ", i, voltValues[i]);
-        }
-        Serial.printf("| Thr: F:%.2fV B:%.2fV | ", ir_threshold_front, ir_threshold_back);
+  }
+  
+  // Process serial commands for dynamic threshold control
+  processSerialCommands();
+  
+  // Check if in emergency escape mode
+  if (emergency_mode) {
+      if (millis() - emergency_start < EMERGENCY_DURATION_MS) {
+          // Continue emergency action - no sensor processing
+          return;
+      } else {
+          // Emergency complete
+          emergency_mode = false;
+          Serial.println("Emergency escape complete!");
+      }
+  }
+  
+  // Read IR sensor values with non-blocking call (proper timing)
+  static unsigned long lastSensorRead = 0;
+  if (millis() - lastSensorRead >= 10) { // Read every 10ms for fast response
+      lastSensorRead = millis();
+      
+      int16_t rawValues[IR_SENSOR_CHANNELS];
+      float voltValues[IR_SENSOR_CHANNELS];
+      adcSampler.readAll(rawValues, voltValues, IR_SENSOR_CHANNELS);
+      
+      // Update calibration if active
+      updateCalibration(voltValues);
+      
+      // Don't process sensor logic during calibration
+      if (auto_threshold_enabled) {
+          car.stop();
+          return;
+      }
+      
+      // Determine which sensors detect EDGE (voltage > threshold = out of area)
+      bool edge_detected[IR_SENSOR_CHANNELS];
+      // A0, A3 use back threshold; A1, A2 use front threshold
+      edge_detected[0] = (voltValues[0] > ir_threshold_back);  // A0 - back-left
+      edge_detected[1] = (voltValues[1] > ir_threshold_front); // A1 - front-left
+      edge_detected[2] = (voltValues[2] > ir_threshold_front); // A2 - front-right
+      edge_detected[3] = (voltValues[3] > ir_threshold_back);  // A3 - back-right
+      
+      // Create bit pattern: [A3][A2][A1][A0] 
+      // 1 = edge detected (danger!), 0 = safe
+      uint8_t pattern = (edge_detected[3] << 3) | (edge_detected[2] << 2) | (edge_detected[1] << 1) | edge_detected[0];
+      
+      // Print sensor readings - simple format
+      Serial.print("Sensors: ");
+      for (int i = 0; i < IR_SENSOR_CHANNELS; i++) {
+          Serial.printf("A%d:%.2fV ", i, voltValues[i]);
+      }
+      Serial.printf("| Thr: F:%.2fV B:%.2fV | ", ir_threshold_front, ir_threshold_back);
 
-        const bool back_edge_active = edge_detected[0] || edge_detected[3];
-        if (back_edge_active) {
-            if (!back_escape_mode) {
-                back_escape_mode = true;
-                edge_verification_mode = false;
-                emergency_mode = false;
-                searchingActive = false;
-                searchStep = 0;
-                Serial.printf("BACK EDGE! Pattern 0b%04b → MAX FORWARD!\n", pattern);
-            }
-            car.forward(BACK_ESCAPE_SPEED);
-            return;
-        } else if (back_escape_mode) {
-            back_escape_mode = false;
-            Serial.println("Back sensors safe again — resuming normal logic");
-        }
-        
-        // NEW LOGIC: Immediate stop on ANY edge detection
-        if (pattern != 0b0000) {
-            // Edge detected!
-            if (!edge_verification_mode && !emergency_mode) {
-                // First detection - STOP IMMEDIATELY
-                car.stop();
-                edge_verification_mode = true;
-                edge_stop_time = millis();
-                last_pattern = pattern;
-                Serial.printf("EDGE DETECTED 0b%04b! STOPPING...\n", pattern);
-                return; // Exit to stop car
-            }
-        }
-        
-        // Check if in verification mode
-        if (edge_verification_mode) {
-            if (millis() - edge_stop_time < EDGE_VERIFY_DELAY_MS) {
-                // Still waiting for verification delay
-                Serial.printf("Verifying... (pattern: 0b%04b)\n", pattern);
-                return;
-            }
-            
-            // Verification delay complete - check if still out of safe zone
-            if (pattern != 0b0000) {
-                // Still detecting edge - start escape!
-                Serial.printf("VERIFIED! Pattern 0b%04b → ", pattern);
-                edge_verification_mode = false;
-                emergency_mode = true;
-                emergency_start = millis();
-                
-                // Execute escape based on pattern
-                executeEscape(pattern);
-                return;
-            } else {
-                // False alarm - back to safe zone
-                Serial.println("False alarm - back to safe zone");
-                edge_verification_mode = false;
-                startSearchingMode(); // Start search mode
-                return;
-            }
-        }
-        
-        /*
-        Sensor Layout:      Bit Pattern: [A3][A2][A1][A0]
-             Front
-          [A1]  [A2]       A1=top-left, A2=top-right
-           |      |        A0=bottom-left, A3=bottom-right
-          [A0]  [A3]
+      const bool back_edge_active = edge_detected[0] || edge_detected[3];
+      if (back_edge_active) {
+          if (!back_escape_mode) {
+              back_escape_mode = true;
+              edge_verification_mode = false;
+              emergency_mode = false;
+              searchingActive = false;
+              searchStep = 0;
+              Serial.printf("BACK EDGE! Pattern 0b%04b → MAX FORWARD!\n", pattern);
+          }
+          car.forward(BACK_ESCAPE_SPEED);
+          return;
+      } else if (back_escape_mode) {
+          back_escape_mode = false;
+          Serial.println("Back sensors safe again — resuming normal logic");
+      }
+      
+      // NEW LOGIC: Immediate stop on ANY edge detection
+      if (pattern != 0b0000) {
+          // Edge detected!
+          if (!edge_verification_mode && !emergency_mode) {
+              // First detection - STOP IMMEDIATELY
+              car.stop();
+              edge_verification_mode = true;
+              edge_stop_time = millis();
+              last_pattern = pattern;
+              Serial.printf("EDGE DETECTED 0b%04b! STOPPING...\n", pattern);
+              return; // Exit to stop car
+          }
+      }
+      
+      // Check if in verification mode
+      if (edge_verification_mode) {
+          if (millis() - edge_stop_time < EDGE_VERIFY_DELAY_MS) {
+              // Still waiting for verification delay
+              Serial.printf("Verifying... (pattern: 0b%04b)\n", pattern);
+              return;
+          }
           
-        HIGH voltage = Edge detected (OUT of safe area) - DANGER!
-        LOW voltage = On table (SAFE)
-        */
+          // Verification delay complete - check if still out of safe zone
+          if (pattern != 0b0000) {
+              // Still detecting edge - start escape!
+              Serial.printf("VERIFIED! Pattern 0b%04b → ", pattern);
+              edge_verification_mode = false;
+              emergency_mode = true;
+              emergency_start = millis();
+              
+              // Execute escape based on pattern
+              executeEscape(pattern);
+              return;
+          } else {
+              // False alarm - back to safe zone
+              Serial.println("False alarm - back to safe zone");
+              edge_verification_mode = false;
+              startSearchingMode(); // Start search mode
+              return;
+          }
+      }
+      
+      /*
+      Sensor Layout:      Bit Pattern: [A3][A2][A1][A0]
+            Front
+        [A1]  [A2]       A1=top-left, A2=top-right
+          |      |        A0=bottom-left, A3=bottom-right
+        [A0]  [A3]
         
-        switch (pattern) {
-            case 0b0000: // All safe - move forward
-                stopSearchingMode();
-                Serial.println("Safe → Forward");
-                car.forward(1.0F);
-                break;
-                
-            default:
-                // This shouldn't happen as edges trigger immediate stop above
-                Serial.printf("Unexpected pattern 0b%04b\n", pattern);
-                break;
-        }
-    }
-    
-    // Update search mode outside sensor reading block (runs continuously when active)
-    updateSearchingMode();
+      HIGH voltage = Edge detected (OUT of safe area) - DANGER!
+      LOW voltage = On table (SAFE)
+      */
+      
+      switch (pattern) {
+          case 0b0000: // All safe - move forward
+              stopSearchingMode();
+              Serial.println("Safe → Forward");
+              car.forward(1.0F);
+              break;
+              
+          default:
+              // This shouldn't happen as edges trigger immediate stop above
+              Serial.printf("Unexpected pattern 0b%04b\n", pattern);
+              break;
+      }
+  }
+  
+  // Update search mode outside sensor reading block (runs continuously when active)
+  updateSearchingMode();
 }
