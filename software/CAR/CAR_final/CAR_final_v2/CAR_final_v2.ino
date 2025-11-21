@@ -8,21 +8,22 @@
  *   - Outputs motor commands to shared memory
  * 
  * Core 1: ALL I/O Operations (Time-Sliced)
- *   - Slot 0 (0ms):   ADS1115 IR sensor read
- *   - Slot 1 (50ms):  ToF sensor 0 read
- *   - Slot 2 (100ms): ADS1115 IR sensor read
- *   - Slot 3 (150ms): ToF sensor 1 read
- *   - Slot 4 (200ms): ADS1115 IR sensor read + Button sampling
- *   - Slot 5 (250ms): ToF sensor 2 read + Button debouncing
- *   - Slot 6 (300ms): ADS1115 IR sensor read
- *   - Slot 7 (350ms): ToF sensor 3 read + Motor PWM update
- *   - Slot 8 (400ms): WiFi/TCP handling
- *   - Slot 9 (450ms): ToF sensor 4 read
+ *   - Slot 0 (0ms):   ADS1115 IR sensor read + Serial telemetry
+ *   - Slot 1 (50ms):  ToF sensor 0 read + Serial telemetry
+ *   - Slot 2 (100ms): ADS1115 IR sensor read + Serial telemetry
+ *   - Slot 3 (150ms): ToF sensor 1 read + Serial telemetry
+ *   - Slot 4 (200ms): ADS1115 IR sensor read + Button sampling + Serial telemetry
+ *   - Slot 5 (250ms): ToF sensor 2 read + Button debouncing + Serial telemetry
+ *   - Slot 6 (300ms): ADS1115 IR sensor read + Serial telemetry
+ *   - Slot 7 (350ms): ToF sensor 3 read + Motor PWM update + Serial telemetry
+ *   - Slot 8 (400ms): ADS1115 IR sensor read + Serial telemetry
+ *   - Slot 9 (450ms): ToF sensor 4 read + Serial telemetry
  *   Total cycle: 500ms (2Hz full sensor sweep)
+ *   IR update rate: 100Hz (every 50ms)
+ *   Telemetry rate: 20Hz (every 50ms)
  */
 
 #include <Wire.h>
-#include <WiFi.h>
 #include <pico/mutex.h>
 
 #include "Car.h"
@@ -41,8 +42,8 @@ constexpr uint8_t RIGHT_MOTOR_PWM = 14;
 constexpr uint8_t RIGHT_MOTOR_DIR = 15;
 constexpr uint32_t MOTOR_PWM_FREQ = 20000;
 
-constexpr uint8_t BUTTON_TEST_PIN = 16;
-constexpr uint8_t BUTTON_RUN_PIN = 17;
+constexpr uint8_t BUTTON_TEST_PIN = 18;
+constexpr uint8_t BUTTON_RUN_PIN = 28;
 
 constexpr uint8_t TOF_NUM = 5;
 constexpr uint8_t TOF_XSHUT_PINS[TOF_NUM] = {8, 7, 6, 5, 4};
@@ -53,11 +54,6 @@ constexpr uint8_t I2C_TOF_SCL = 3;
 
 constexpr uint8_t IR_SENSOR_CHANNELS = 4;
 constexpr uint8_t ADS1115_I2C_ADDRESS = 0x48;
-
-// --- WiFi Configuration ---
-const char* AP_SSID = "BottleSumo_AP";
-const char* AP_PASSWORD = "sumobot123456";
-const uint16_t TCP_PORT = 8080;
 
 // --- Time Slicing ---
 constexpr uint32_t TIME_SLICE_MS = 50;      // Each slot is 50ms
@@ -72,7 +68,10 @@ constexpr float IR_THRESHOLD_BACK = 3.0f;
 // --- Behavior Parameters ---
 constexpr float ESCAPE_SPEED = 50.0f;
 constexpr float BACK_ESCAPE_SPEED = 100.0f;
-constexpr float SEARCH_SPIN_SPEED = 35.0f;
+constexpr float SEARCH_FORWARD_SPEED = 50.0f;
+constexpr float SEARCH_TURN_SPEED = 50.0f;
+constexpr uint32_t SEARCH_STEP_DURATION_MS = 500;
+constexpr uint32_t SEARCH_STOP_DURATION_MS = 200;
 constexpr float ALIGN_SPIN_SPEED = 32.0f;
 constexpr float ALIGN_FINE_SPIN_SPEED = 18.0f;
 constexpr float ATTACK_SPEED = 100.0f;
@@ -152,6 +151,10 @@ struct StateMachine {
     float targetBias = 0.0f;
     unsigned long lastTargetSeen = 0;
     
+    // Searching state (pattern: forward → left → right → stop → repeat)
+    uint8_t searchStep = 0;  // 0: forward, 1: left, 2: right, 3: stop
+    unsigned long searchStepStart = 0;
+    
     // Timing
     unsigned long stateEntryTime = 0;
 };
@@ -220,6 +223,12 @@ void transitionState(RobotState newState) {
         gStateMachine.previousState = gStateMachine.currentState;
         gStateMachine.currentState = newState;
         gStateMachine.stateEntryTime = millis();
+        
+        // Initialize search pattern when entering SEARCHING state
+        if (newState == RobotState::SEARCHING) {
+            gStateMachine.searchStep = 0;
+            gStateMachine.searchStepStart = millis();
+        }
         
         Serial.print("[STATE] ");
         Serial.print((int)gStateMachine.previousState);
@@ -343,8 +352,48 @@ void stateMachineUpdate() {
                 gStateMachine.lastTargetSeen = millis();
                 transitionState(RobotState::TRACKING);
             } else {
-                // Spin search
-                writeMotorCommand(SEARCH_SPIN_SPEED, SEARCH_SPIN_SPEED);
+                // Execute search pattern: forward → left → right → stop → repeat
+                unsigned long now = millis();
+                unsigned long elapsed = now - gStateMachine.searchStepStart;
+                
+                switch (gStateMachine.searchStep) {
+                    case 0: // Forward
+                        writeMotorCommand(SEARCH_FORWARD_SPEED, -SEARCH_FORWARD_SPEED);
+                        if (elapsed >= SEARCH_STEP_DURATION_MS) {
+                            gStateMachine.searchStep = 1;
+                            gStateMachine.searchStepStart = now;
+                        }
+                        break;
+                        
+                    case 1: // Turn left
+                        writeMotorCommand(-SEARCH_TURN_SPEED, -SEARCH_TURN_SPEED);
+                        if (elapsed >= SEARCH_STEP_DURATION_MS) {
+                            gStateMachine.searchStep = 2;
+                            gStateMachine.searchStepStart = now;
+                        }
+                        break;
+                        
+                    case 2: // Turn right
+                        writeMotorCommand(SEARCH_TURN_SPEED, SEARCH_TURN_SPEED);
+                        if (elapsed >= SEARCH_STEP_DURATION_MS) {
+                            gStateMachine.searchStep = 3;
+                            gStateMachine.searchStepStart = now;
+                        }
+                        break;
+                        
+                    case 3: // Stop briefly
+                        writeMotorCommand(0, 0);
+                        if (elapsed >= SEARCH_STOP_DURATION_MS) {
+                            gStateMachine.searchStep = 0;
+                            gStateMachine.searchStepStart = now;
+                        }
+                        break;
+                        
+                    default:
+                        gStateMachine.searchStep = 0;
+                        gStateMachine.searchStepStart = now;
+                        break;
+                }
             }
             break;
         }
@@ -374,11 +423,15 @@ void stateMachineUpdate() {
                     }
                 }
             } else {
-                // Lost target
-                if (millis() - gStateMachine.lastTargetSeen > LOST_HOLD_MS) {
+                // Lost target - check timeout
+                unsigned long timeLost = millis() - gStateMachine.lastTargetSeen;
+                if (timeLost > LOST_HOLD_MS) {
+                    Serial.print("[TRACKING] Target lost for ");
+                    Serial.print(timeLost);
+                    Serial.println("ms -> SEARCHING");
                     transitionState(RobotState::SEARCHING);
                 } else {
-                    writeMotorCommand(0, 0); // Hold
+                    writeMotorCommand(0, 0); // Hold and wait
                 }
             }
             break;
@@ -401,8 +454,17 @@ void stateMachineUpdate() {
                     transitionState(RobotState::TRACKING);
                 }
             } else {
-                // Lost target
-                transitionState(RobotState::TRACKING);
+                // Lost target - check if lost too long
+                unsigned long timeLost = millis() - gStateMachine.lastTargetSeen;
+                if (timeLost > LOST_HOLD_MS) {
+                    Serial.print("[ATTACKING] Target lost for ");
+                    Serial.print(timeLost);
+                    Serial.println("ms -> SEARCHING");
+                    transitionState(RobotState::SEARCHING);
+                } else {
+                    // Brief loss - go back to tracking to realign
+                    transitionState(RobotState::TRACKING);
+                }
             }
             break;
         }
@@ -453,8 +515,6 @@ Car gCar;
 ToFArray gTof(&Wire1, nullptr);
 Ads1115Sampler gAdc;
 ButtonManager gButtonMgr(BUTTON_TEST_PIN, BUTTON_RUN_PIN);
-WiFiServer gServer(TCP_PORT);
-WiFiClient gClient;
 
 uint8_t gCurrentSlot = 0;
 unsigned long gLastSlotTime = 0;
@@ -474,20 +534,24 @@ void readMotorCommand(MotorCommand& cmd) {
 }
 
 // Time-sliced tasks
-void slot0_IR_Read() {
+void slot0_IR_Telemetry() {
+    // Read IR sensors
     int16_t raw[IR_SENSOR_CHANNELS];
     float volts[IR_SENSOR_CHANNELS];
     gAdc.readAll(raw, volts, IR_SENSOR_CHANNELS);
     
     SensorData data;
-    readSensorData(data); // Get current data
+    readSensorData(data);
     memcpy(data.irVoltages, volts, sizeof(volts));
     data.irValid = true;
     data.timestamp = millis();
     writeSensorData(data);
+    
+    // Print telemetry
+    printTelemetry();
 }
 
-void slot1_ToF0_Read() {
+void slot1_ToF0_Telemetry() {
     ToFSample sample;
     gTof.readOne(0, &sample, DETECT_MIN_MM, DETECT_MAX_MM, 3);
     
@@ -497,13 +561,15 @@ void slot1_ToF0_Read() {
     data.tofValid[0] = sample.valid;
     data.timestamp = millis();
     writeSensorData(data);
+    
+    printTelemetry();
 }
 
-void slot2_IR_Read() {
-    slot0_IR_Read(); // Same as slot 0
+void slot2_IR_Telemetry() {
+    slot0_IR_Telemetry(); // Same as slot 0
 }
 
-void slot3_ToF1_Read() {
+void slot3_ToF1_Telemetry() {
     ToFSample sample;
     gTof.readOne(1, &sample, DETECT_MIN_MM, DETECT_MAX_MM, 3);
     
@@ -513,19 +579,31 @@ void slot3_ToF1_Read() {
     data.tofValid[1] = sample.valid;
     data.timestamp = millis();
     writeSensorData(data);
+    
+    printTelemetry();
 }
 
-void slot4_IR_Button_Sample() {
-    slot0_IR_Read();
-    gButtonMgr.sample(5); // 5ms budget
+void slot4_IR_Button_Telemetry() {
+    // Read IR
+    int16_t raw[IR_SENSOR_CHANNELS];
+    float volts[IR_SENSOR_CHANNELS];
+    gAdc.readAll(raw, volts, IR_SENSOR_CHANNELS);
     
     SensorData data;
     readSensorData(data);
+    memcpy(data.irVoltages, volts, sizeof(volts));
+    data.irValid = true;
+    
+    // Sample buttons
+    gButtonMgr.sample(5);
     data.buttonMode = gButtonMgr.getMode();
+    data.timestamp = millis();
     writeSensorData(data);
+    
+    printTelemetry();
 }
 
-void slot5_ToF2_Button_Debounce() {
+void slot5_ToF2_Button_Telemetry() {
     ToFSample sample;
     gTof.readOne(2, &sample, DETECT_MIN_MM, DETECT_MAX_MM, 3);
     
@@ -533,21 +611,21 @@ void slot5_ToF2_Button_Debounce() {
     readSensorData(data);
     data.tofDistances[2] = sample.distanceMm;
     data.tofValid[2] = sample.valid;
-    writeSensorData(data);
     
-    gButtonMgr.debounce(20); // 20ms budget
-    
-    readSensorData(data);
+    // Debounce buttons
+    gButtonMgr.debounce(20);
     data.buttonMode = gButtonMgr.getMode();
     data.timestamp = millis();
     writeSensorData(data);
+    
+    printTelemetry();
 }
 
-void slot6_IR_Read() {
-    slot0_IR_Read();
+void slot6_IR_Telemetry() {
+    slot0_IR_Telemetry(); // Same as slot 0
 }
 
-void slot7_ToF3_Motor_Update() {
+void slot7_ToF3_Motor_Telemetry() {
     ToFSample sample;
     gTof.readOne(3, &sample, DETECT_MIN_MM, DETECT_MAX_MM, 3);
     
@@ -567,51 +645,15 @@ void slot7_ToF3_Motor_Update() {
     } else {
         gCar.setMotors(cmd.leftSpeed, cmd.rightSpeed);
     }
-}
-
-void slot8_WiFi_Handling() {
-    // Check for new clients
-    if (!gClient || !gClient.connected()) {
-        WiFiClient newClient = gServer.accept();
-        if (newClient) {
-            gClient = newClient;
-            Serial.println("[WiFi] Client connected");
-        }
-    }
     
-    // Send telemetry
-    if (gClient && gClient.connected()) {
-        TelemetryData telem;
-        mutex_enter_blocking(&gTelemetryMutex);
-        telem = gSharedTelemetry;
-        mutex_exit(&gTelemetryMutex);
-        
-        // Simple JSON telemetry
-        String json = "{\"t\":";
-        json += String(telem.timestamp);
-        json += ",\"ir\":[";
-        for (int i = 0; i < IR_SENSOR_CHANNELS; i++) {
-            json += String(telem.sensors.irVoltages[i], 2);
-            if (i < IR_SENSOR_CHANNELS - 1) json += ",";
-        }
-        json += "],\"tof\":[";
-        for (int i = 0; i < TOF_NUM; i++) {
-            json += String(telem.sensors.tofDistances[i]);
-            if (i < TOF_NUM - 1) json += ",";
-        }
-        json += "],\"m\":[";
-        json += String(telem.motors.leftSpeed);
-        json += ",";
-        json += String(telem.motors.rightSpeed);
-        json += "],\"s\":";
-        json += String(telem.stateMode);
-        json += "}";
-        
-        gClient.println(json);
-    }
+    printTelemetry();
 }
 
-void slot9_ToF4_Read() {
+void slot8_IR_Telemetry() {
+    slot0_IR_Telemetry(); // Same as slot 0
+}
+
+void slot9_ToF4_Telemetry() {
     ToFSample sample;
     gTof.readOne(4, &sample, DETECT_MIN_MM, DETECT_MAX_MM, 3);
     
@@ -621,6 +663,49 @@ void slot9_ToF4_Read() {
     data.tofValid[4] = sample.valid;
     data.timestamp = millis();
     writeSensorData(data);
+    
+    printTelemetry();
+}
+
+// Shared telemetry print function
+void printTelemetry() {
+    TelemetryData telem;
+    mutex_enter_blocking(&gTelemetryMutex);
+    telem = gSharedTelemetry;
+    mutex_exit(&gTelemetryMutex);
+    
+    // State names
+    const char* states[] = {"IDLE", "CALIBRATING", "SEARCHING", "TRACKING", "ATTACKING", "EDGE_AVOIDING"};
+    const char* state_name = (telem.stateMode < 6) ? states[telem.stateMode] : "UNKNOWN";
+    
+    // Print human-readable format
+    Serial.print("[");
+    Serial.print(telem.timestamp);
+    Serial.print("ms] ");
+    Serial.print(state_name);
+    Serial.print(" | IR: BL=");
+    Serial.print(telem.sensors.irVoltages[0], 2);
+    Serial.print("V FL=");
+    Serial.print(telem.sensors.irVoltages[1], 2);
+    Serial.print("V FR=");
+    Serial.print(telem.sensors.irVoltages[2], 2);
+    Serial.print("V BR=");
+    Serial.print(telem.sensors.irVoltages[3], 2);
+    Serial.print("V | ToF: R45=");
+    Serial.print(telem.sensors.tofDistances[0]);
+    Serial.print(" R23=");
+    Serial.print(telem.sensors.tofDistances[1]);
+    Serial.print(" MID=");
+    Serial.print(telem.sensors.tofDistances[2]);
+    Serial.print(" L23=");
+    Serial.print(telem.sensors.tofDistances[3]);
+    Serial.print(" L45=");
+    Serial.print(telem.sensors.tofDistances[4]);
+    Serial.print(" | Motor: L=");
+    Serial.print(telem.motors.leftSpeed, 1);
+    Serial.print(" R=");
+    Serial.print(telem.motors.rightSpeed, 1);
+    Serial.println();
 }
 
 void setup1() {
@@ -632,7 +717,9 @@ void setup1() {
     Wire1.begin();
     
     // Init ADS1115
-    if (!gAdc.begin(ADS1115_I2C_ADDRESS, &Wire1, GAIN_ONE, 860)) {
+    // RATE_ADS1115_860SPS = 7 (0-7 for different rates)
+    // Using highest sample rate for fast IR sensor reading
+    if (!gAdc.begin(ADS1115_I2C_ADDRESS, &Wire1, GAIN_ONE, 7)) {
         Serial.println("[CORE1] ADS1115 FAILED");
     } else {
         Serial.println("[CORE1] ADS1115 OK");
@@ -664,13 +751,6 @@ void setup1() {
     gButtonMgr.begin();
     Serial.println("[CORE1] Buttons OK");
     
-    // Init WiFi
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
-    Serial.print("[CORE1] WiFi AP: ");
-    Serial.println(WiFi.softAPIP());
-    gServer.begin();
-    Serial.println("[CORE1] TCP Server started");
     
     gLastSlotTime = millis();
     Serial.println("[CORE1] Ready - Time-Sliced Scheduler Active");
@@ -685,16 +765,16 @@ void loop1() {
         
         // Execute current slot
         switch (gCurrentSlot) {
-            case 0: slot0_IR_Read(); break;
-            case 1: slot1_ToF0_Read(); break;
-            case 2: slot2_IR_Read(); break;
-            case 3: slot3_ToF1_Read(); break;
-            case 4: slot4_IR_Button_Sample(); break;
-            case 5: slot5_ToF2_Button_Debounce(); break;
-            case 6: slot6_IR_Read(); break;
-            case 7: slot7_ToF3_Motor_Update(); break;
-            case 8: slot8_WiFi_Handling(); break;
-            case 9: slot9_ToF4_Read(); break;
+            case 0: slot0_IR_Telemetry(); break;
+            case 1: slot1_ToF0_Telemetry(); break;
+            case 2: slot2_IR_Telemetry(); break;
+            case 3: slot3_ToF1_Telemetry(); break;
+            case 4: slot4_IR_Button_Telemetry(); break;
+            case 5: slot5_ToF2_Button_Telemetry(); break;
+            case 6: slot6_IR_Telemetry(); break;
+            case 7: slot7_ToF3_Motor_Telemetry(); break;
+            case 8: slot8_IR_Telemetry(); break;
+            case 9: slot9_ToF4_Telemetry(); break;
         }
         
         // Advance to next slot
