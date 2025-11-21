@@ -158,51 +158,42 @@ Run Mode:  Pin 17
 - **ToF**: 2Hz per sensor
 - **Motors**: 2Hz command updates
 
-## WiFi Telemetry & GUI Viewer
+## WiFi Telemetry
 
-### Quick Start
-1. **Connect to Robot WiFi**
-   - SSID: `BottleSumo_AP`
-   - Password: `sumobot123456`
-   
-2. **View Real-Time Data**
-   ```bash
-   # Simple GUI viewer
-   python3 simple_viewer_v2.py
-   
-   # Or command line
-   nc 192.168.4.1 8080
-   ```
-
-### Connection Details
+### Connection
 ```
 SSID:     BottleSumo_AP
 Password: sumobot123456
 IP:       192.168.4.1
 Port:     8080
-Rate:     2Hz (every 500ms)
 ```
 
 ### JSON Format
 ```json
 {
-  "t": 12345,                          // Timestamp (ms)
-  "ir": [0.12, 1.45, 1.50, 0.10],      // IR voltages [A0,A1,A2,A3]
-  "tof": [120, 115, 110, 118, 125],    // ToF distances [R45,R23,C,L23,L45]
-  "m": [35.0, 35.0],                   // Motors [left, right]
-  "s": 3                               // State (0-5)
+  "t": 12345,
+  "ir": [0.12, 1.45, 1.50, 0.10],
+  "tof": [120, 115, 110, 118, 125],
+  "m": [35.0, 35.0],
+  "s": 3
 }
 ```
 
-### GUI Viewer Features
-- ✅ Real-time sensor display
-- ✅ Color-coded edge detection
-- ✅ Target tracking visualization
-- ✅ State machine monitoring
-- ✅ Motor speed display
-- ✅ Console logging
+### Python Client Example
+```python
+import socket
+import json
 
-**For detailed WiFi & GUI setup, see [`WIFI_GUI_GUIDE.md`](WIFI_GUI_GUIDE.md)**
+sock = socket.socket()
+sock.connect(('192.168.4.1', 8080))
+
+while True:
+    data = sock.recv(1024).decode()
+    for line in data.split('\n'):
+        if line:
+            telem = json.loads(line)
+            print(f"State: {telem['s']}, Center ToF: {telem['tof'][2]}mm")
+```
 
 ## Tuning Parameters
 
