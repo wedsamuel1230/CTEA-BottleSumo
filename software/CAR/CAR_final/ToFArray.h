@@ -44,6 +44,9 @@ public:
   // Read all sensors sequentially while holding the bus mutex (if provided)
   void readAll(ToFSample* out, uint16_t minMm = 30, uint16_t maxMm = 1500, uint8_t maxStatus = 2);
 
+  // Read single sensor (for time-sliced scheduling)
+  void readOne(uint8_t index, ToFSample* out, uint16_t minMm = 30, uint16_t maxMm = 1500, uint8_t maxStatus = 2);
+
   // Status checks (inline for performance)
   uint8_t size() const { return _count; }
   bool isOnline(uint8_t idx) const { return idx < _count ? _online[idx] : false; }

@@ -59,3 +59,45 @@ void ToFArray::readAll(ToFSample* out, uint16_t minMm, uint16_t maxMm, uint8_t m
   }
   if (_wireMutex) mutex_exit(_wireMutex);
 }
+
+void ToFArray::readOne(uint8_t index, ToFSample* out, uint16_t minMm, uint16_t maxMm, uint8_t maxStatus) {
+  if (index >= _count || !_online[index]) {
+    out->distanceMm = 0;
+    out->status = 0xFF;
+    out->valid = false;
+    return;
+  }
+  
+  if (_wireMutex) mutex_enter_blocking(_wireMutex);
+  
+  VL53L0X_RangingMeasurementData_t data;
+  _lox[index].rangingTest(&data, false);
+  
+  bool valid = (data.RangeStatus <= maxStatus) && (data.RangeMilliMeter >= minMm) && (data.RangeMilliMeter < maxMm);
+  out->distanceMm = valid ? data.RangeMilliMeter : 0;
+  out->status = data.RangeStatus;
+  out->valid = valid;
+  
+  if (_wireMutex) mutex_exit(_wireMutex);
+}
+
+void ToFArray::readOne(uint8_t index, ToFSample* out, uint16_t minMm, uint16_t maxMm, uint8_t maxStatus) {
+  if (index >= _count || !_online[index]) {
+    out->distanceMm = 0;
+    out->status = 0xFF;
+    out->valid = false;
+    return;
+  }
+  
+  if (_wireMutex) mutex_enter_blocking(_wireMutex);
+  
+  VL53L0X_RangingMeasurementData_t data;
+  _lox[index].rangingTest(&data, false);
+  
+  bool valid = (data.RangeStatus <= maxStatus) && (data.RangeMilliMeter >= minMm) && (data.RangeMilliMeter < maxMm);
+  out->distanceMm = valid ? data.RangeMilliMeter : 0;
+  out->status = data.RangeStatus;
+  out->valid = valid;
+  
+  if (_wireMutex) mutex_exit(_wireMutex);
+}
