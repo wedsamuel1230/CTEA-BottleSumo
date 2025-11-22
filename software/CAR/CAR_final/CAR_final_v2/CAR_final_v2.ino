@@ -735,6 +735,14 @@ void setup1() {
         Serial.print(online);
         Serial.print("/");
         Serial.println(TOF_NUM);
+        
+        // Print I2C address for each sensor
+        for (uint8_t i = 0; i < TOF_NUM; i++) {
+            Serial.print("  - ");
+            Serial.print(TOF_NAMES[i]);
+            Serial.print(" @ 0x");
+            Serial.println(TOF_I2C_ADDR[i], HEX);
+        }
     }
     
     // Init motors

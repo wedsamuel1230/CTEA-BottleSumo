@@ -304,6 +304,15 @@ void setup() {
 	gTof.setTiming(33000, 14, 10);
 	uint8_t online = gTof.beginAll();
 	Serial.printf("[CORE0] Sensors online: %u/%u\n", online, TOF_NUM);
+	
+	// Print I2C address for each sensor
+	for (uint8_t i = 0; i < TOF_NUM; i++) {
+		Serial.print("  - ");
+		Serial.print(TOF_NAMES[i]);
+		Serial.print(" @ 0x");
+		Serial.println(TOF_I2C_ADDR[i], HEX);
+	}
+	
 	gLastTargetSeen = millis();
 }
 
