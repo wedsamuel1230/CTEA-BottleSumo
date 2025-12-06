@@ -17,13 +17,6 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
-// OLED Display Configuration
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-#define SCREEN_ADDRESS 0x3C
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire1, OLED_RESET);
-
 // WiFi AP Configuration
 const char* ap_ssid = "BottleSumo_Robot";      // WiFi network name
 const char* ap_password = "sumo2025";          // Password (min 8 characters)
